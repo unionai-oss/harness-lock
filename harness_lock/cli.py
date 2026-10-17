@@ -47,6 +47,7 @@ from harness_lock import localize as _localize
 from harness_lock import optimize as al_optimize
 from harness_lock import pin as _pin
 from harness_lock import resolve as _resolve
+from harness_lock import resolve_plan as _resolve_plan
 from harness_lock import select_harness as _select_harness
 from harness_lock import upgrade as al_upgrade
 
@@ -518,19 +519,89 @@ def init(scan_dir: str | None, harness: str | None, packs: tuple[str, ...], name
     _next(f"review {_show(p)}", "hlock resolve")
 
 
+def _plan_panel(plan: dict) -> Panel:
+    t = _kv_table()
+    for role, specs in plan["llm"].items():
+        t.add_row(f"llm · {role}", ", ".join(specs))
+    for h in plan["harnesses"]:
+        adapter = plan["adapters"].get(h)
+        note = "" if adapter == h else f"  [muted](trials on the {adapter} adapter: a stand-in)[/]"
+        t.add_row("harness", f"[bold]{h}[/]{note}")
+    t.add_row("decision", ", ".join(plan["decisions"]))
+    product = f"{plan['stacks']} stack{'s' if plan['stacks'] != 1 else ''} × {plan['tasks']} task{'s' if plan['tasks'] != 1 else ''} × {plan['seeds']} seed{'s' if plan['seeds'] != 1 else ''}"
+    cap = plan.get("max-trials")
+    capped = f"  [muted](capped by max_trials = {cap})[/]" if cap is not None and cap < plan["stacks"] * plan["tasks"] * plan["seeds"] else ""
+    t.add_row("search", f"{product} = [bold]{plan['trials']} trials[/]{capped}")
+    if plan.get("stacks-truncated"):
+        t.add_row("", "[warn]more than 200 stacks; only the first 200 are tried[/]")
+    t.add_row("holdout", f"{plan['holdout-tasks']} task{'s' if plan['holdout-tasks'] != 1 else ''}")
+    t.add_row("backend", plan["backend"])
+    per = plan.get("peripherals") or {}
+    if "error" in per:
+        t.add_row("locks", f"[fail]{escape(per['error'])}[/]")
+    else:
+        parts = [f"{per.get('mcp-servers', 0)} MCP server{'s' if per.get('mcp-servers') != 1 else ''}",
+                 f"{per.get('skills', 0)} skill{'s' if per.get('skills') != 1 else ''}",
+                 f"{per.get('instructions', 0)} instruction file{'s' if per.get('instructions') != 1 else ''}"]
+        t.add_row("locks", ", ".join(parts))
+        if per.get("secrets"):
+            t.add_row("secrets", ", ".join(per["secrets"]) + "  [muted](supplied as environment variables)[/]")
+    return Panel(t, title=f"[brand]resolve plan · {_md()}[/]", title_align="left", border_style="magenta",
+                 expand=False, padding=(1, 2))
+
+
 @main.command()
 @click.option("--backend", default=None, type=click.Choice(["local", "devbox", "cluster"]),
               help="Override the manifest's \\[backend] target.")
 @click.option("--harness", "harness", default=None,
               help="Target harness, overriding \\[target] harness (e.g. claude, codex, pi, opencode).")
-@click.option("--workdir", default=None, help="Where to put trial artifacts.  [dim]\\[default: .harnesslock][/]")
-def resolve(backend: str | None, harness: str | None, workdir: str | None) -> None:
-    """Tune the search space and write [path]harness.lock[/]."""
+@click.option("--workdir", default=None, help="Where to put trial artifacts.  [dim]\\[default: .harnesslock in the project][/]")
+@click.option("--offline", is_flag=True, help="Don't look up package versions or git commits for declared peripherals.")
+@click.option("--dry-run", is_flag=True, help="Show the search space and what would be locked; run nothing.")
+@click.option("--json", "as_json", is_flag=True, help="Print the plan as JSON; run nothing.")
+@click.option("--init", "run_init", is_flag=True, help="If there's no harness.toml, create one with [cmd]hlock init --yes[/] first.")
+@click.pass_context
+def resolve(ctx: click.Context, backend: str | None, harness: str | None, workdir: str | None, offline: bool,
+            dry_run: bool, as_json: bool, run_init: bool) -> None:
+    """Tune the search space and write [path]harness.lock[/].
+
+    Measures each candidate stack on the task packs, picks the winner, and pins it together
+    with the [key]\\[tools][/], [key]\\[skills][/] and [key]\\[instructions][/] the manifest declares
+    (package versions, git commits, digests), so the lock can be synced and launched.
+    """
+    if not Path(_m()).exists():
+        interactive = sys.stdin.isatty() and not (dry_run or as_json)
+        if run_init or (interactive and click.confirm(
+                f"No {MANIFEST} in this directory or above. Scan your setup and create one with hlock init?",
+                default=True)):
+            ctx.invoke(init, harness=harness, yes=not interactive)
+            console.print()
+        else:
+            _fail(f"no {MANIFEST} in this directory or above",
+                  "create one with [cmd]hlock init[/], run [cmd]hlock resolve --init[/], or point at one with [cmd]-m PATH[/]")
+    if dry_run or as_json:
+        with _working("Planning…"):
+            plan = json.loads(_resolve_plan(_m(), backend=backend, harness=harness))
+        if as_json:
+            console.print_json(data=plan)
+            return
+        console.print(_plan_panel(plan))
+        for w in (plan.get("peripherals") or {}).get("warnings", []):
+            console.print(f"[warn]![/] {escape(w)}")
+        _next("hlock resolve")
+        return
     with _working(f"Resolving {_md()} on the {backend or 'configured'} backend…"):
-        lf = _resolve(_m(), backend=backend, workdir=workdir, harness=harness, lock=_l())
+        lf = _resolve(_m(), backend=backend, workdir=workdir, harness=harness, lock=_l(), offline=offline)
     _ok(f"wrote [path]{_ld()}[/]")
     console.print(_lock_panel(lf))
     lock = json.loads(lf.to_json())
+    mcp = sum(1 for t in lock.get("tool", []) if t.get("kind") == "mcp")
+    skills, ins = len(lock.get("skill", [])), len(lock.get("instructions", []))
+    if mcp or skills or ins:
+        console.print(f"[muted]locked {mcp} MCP server{'s' if mcp != 1 else ''}, {skills} skill{'s' if skills != 1 else ''}, "
+                      f"{ins} instruction file{'s' if ins != 1 else ''}[/]")
+    for w in lf.warnings:
+        console.print(f"[warn]![/] {escape(w)}")
     adapter = (lock.get("harness") or {}).get("adapter")
     if adapter and adapter != lf.harness:
         console.print(
@@ -545,7 +616,8 @@ def resolve(backend: str | None, harness: str | None, workdir: str | None) -> No
                 f"[warn]![/] --harness isn't recorded in [path]{_md()}[/]; add "
                 f'[key]\\[target] harness = "{lf.harness}"[/] so [cmd]hlock check[/] can enforce it'
             )
-    _next("hlock check", 'hlock run "<prompt>"')
+    nxt = ["hlock check", "hlock sync" if (mcp or skills) else 'hlock run "<prompt>"']
+    _next(*nxt)
 
 
 @main.command()

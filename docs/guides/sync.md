@@ -1,8 +1,9 @@
 # Rehydrating with sync
 
 `hlock sync` turns a lock back into a working setup: on a new laptop, in a fresh VM, in an
-isolated directory, or in a Docker image. It works on any lock, and gets the most out of one
-written by [`hlock pin`](pin.md).
+isolated directory, or in a Docker image. It works on any lock: one written by [`hlock pin`](pin.md)
+restores your harness config wholesale, and one written by `hlock resolve` restores the MCP
+servers, skills and instruction files the manifest declares.
 
 Installing everything automatically across package managers, operating systems, GUI apps and
 model stores isn't realistic, so `sync` builds a **plan** in which every step is one of:

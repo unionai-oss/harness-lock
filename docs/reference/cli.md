@@ -83,17 +83,46 @@ hlock init [--dir DIR] [--harness NAME] [--pack PATH]... [--yes | --interactive]
 ## `resolve`
 
 Run the resolver over the manifest's search space, write `harness.lock`, and print the
-chosen stack with its evidence.
+chosen stack with its evidence. The lock also pins what the manifest declares under
+`[tools]`, `[skills]` and `[instructions]`: MCP servers get an exact launch command (npm
+versions are looked up when not given), skills get a tree digest (and are vendored when they
+live outside the project), git skills are resolved to a commit, and instruction files get a
+digest. A resolved lock can then be [synced](../guides/sync.md) and
+[launched](../guides/launch.md) like a pinned one.
 
 ```bash
 hlock resolve [--backend local|devbox|cluster] [--harness NAME] [--workdir DIR]
+              [--offline] [--dry-run | --json] [--init]
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `--backend` | manifest `[backend] target` | Where trials run |
 | `--harness` | manifest `[target] harness` | Target harness for this run. See [Harnesses](../guides/harnesses.md#resolve-for-a-target). |
-| `--workdir` | `.harnesslock` | Where trial artifacts go |
+| `--workdir` | `.harnesslock` in the project | Where trial artifacts go |
+| `--offline` | | Don't look up npm versions or git commits; unpinned entries are recorded as declared, with a warning |
+| `--dry-run` | | Show the search space (stacks × tasks × seeds = trials), the adapter that runs each harness, and what would be locked; run nothing |
+| `--json` | | The same plan as JSON; run nothing |
+| `--init` | | If there's no `harness.toml`, create one with `hlock init --yes` first |
+
+Without a manifest, `resolve` offers to run [`hlock init`](../guides/init.md) on a terminal,
+and fails with a hint otherwise.
+
+```console
+$ hlock resolve --dry-run
+╭─ resolve plan · harness.toml ───────────────────────────────────────────────╮
+│  llm · planner  reference:qwen-7b, reference:qwen-32b                       │
+│  harness        claude-code  (trials on the reference adapter: a stand-in)  │
+│  decision       none, rules:default                                         │
+│  search         4 stacks × 1 task × 2 seeds = 8 trials                      │
+│  holdout        1 task                                                      │
+│  backend        local                                                       │
+│  locks          2 MCP servers, 2 skills, 1 instruction file                 │
+│  secrets        HLOCK_SECRET_GITHUB_GITHUB_TOKEN  (supplied as environment  │
+│                 variables)                                                  │
+╰─────────────────────────────────────────────────────────────────────────────╯
+! mcp fs: npm:mcp-fs has no version; pin one (npm:mcp-fs@x.y.z) or resolve online
+```
 
 ## `pin`
 

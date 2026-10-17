@@ -20,6 +20,7 @@ pub mod hash;
 pub mod lockfile;
 pub mod manifest;
 pub mod ops;
+pub mod peripherals;
 pub mod profiles;
 pub mod providers;
 pub mod search;

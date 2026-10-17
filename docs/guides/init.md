@@ -84,8 +84,9 @@ files = ["AGENTS.md"]
 ```
 
 Only `[candidates]` (models, harnesses, decision models) changes what `hlock resolve`
-searches today. `[tools]`, `[skills]` and `[instructions]` are recorded in the lock but not
-searched yet. Choosing **Your own agent** adds a commented
+searches today. `[tools]`, `[skills]` and `[instructions]` are locked (pinned versions,
+digests, vendored copies) but not searched yet. Run `hlock resolve --dry-run` to see the
+search space before spending anything. Choosing **Your own agent** adds a commented
 [`[harnesses.<id>]`](harnesses.md#your-own-agent-frameworks-and-custom-scripts) stub for you
 to fill in with an entrypoint. If no task pack is found, `init` leaves a placeholder and says
 so; `hlock resolve` needs one.

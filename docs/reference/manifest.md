@@ -131,12 +131,59 @@ entrypoint = "triage.agent:run"
 |---|---|---|
 | `target` | `"local"` | `local`, `devbox`, or `cluster`. See [Backends](../guides/backends.md). |
 
+## `[tools]`
+
+MCP servers (and harness built-ins) to lock. [`hlock init`](../guides/init.md) writes these
+from your harness.
+
+```toml
+[tools]
+python = {}                                                                   # a built-in
+github = { mcp = "npm:@modelcontextprotocol/server-github@2025.9.1", env = ["GITHUB_TOKEN"] }
+fetch = { mcp = "pypi:mcp-server-fetch==2025.4.7" }
+docs = { url = "https://docs.example.com/mcp", headers = ["Authorization"] }
+local = { command = "./bin/server", args = ["--stdio"] }
+```
+
+| Key | Description |
+|---|---|
+| `mcp` | A package: `npm:pkg[@version]` (run with `npx`), `pypi:pkg[==version]` (`uvx`), or `oci:image[:tag]` (`docker run`). `resolve` looks up an npm package's current version when none is given (not with `--offline`). |
+| `url`, `transport` | A remote server (`transport` defaults to `http`) |
+| `command`, `args` | Any stdio command |
+| `env`, `headers` | Names of the environment variables and headers the server needs. Values are never stored: the lock uses `${HLOCK_SECRET_…}` placeholders that [`sync`](../guides/sync.md) and [`launch`](../guides/launch.md) fill in. |
+| `permissions` | Recorded in the lock |
+
+## `[skills]`
+
+```toml
+[skills]
+notes = { path = "./skills/notes", editable = true }      # in the project
+mine = { path = "~/.claude/skills/mine" }                 # yours; vendored into .hlock/vendor/
+pdf = { git = "https://github.com/anthropics/skills", rev = "main", path = "skills/pdf" }
+```
+
+`path` skills are locked with a tree digest; ones outside the project are vendored next to
+the lock. `git` skills are resolved to a commit (`rev`, `tag`, `branch` or `commit`). A
+declared skill that doesn't exist fails `resolve`. `registry`, `gh`, `oci` and `plugin`
+sources are recorded as declared but not fetched yet.
+
+## `[instructions]`
+
+```toml
+[instructions]
+files = ["AGENTS.md", "~/.claude/CLAUDE.md"]
+```
+
+Each file is locked with a digest; user-level ones are vendored.
+
+`[tools]`, `[skills]` and `[instructions]` are locked, not searched: `resolve` doesn't try
+stacks with and without them yet.
+
 ## Reserved sections
 
-`[tools]`, `[skills]`, `[instructions]`, `[context]`, and `[enforce]` are parsed and
-included in the manifest hash. They're placeholders for the peripherals described in
-the [design spec](https://github.com/unionai-oss/hlock/blob/main/SPEC.md), and
-the v0.1 resolver doesn't search over them yet.
+`[context]` and `[enforce]` are parsed and included in the manifest hash. They're
+placeholders for features described in the
+[design spec](https://github.com/unionai-oss/hlock/blob/main/SPEC.md).
 
 ## The manifest hash
 

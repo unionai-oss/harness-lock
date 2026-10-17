@@ -326,9 +326,12 @@ pub fn discover(reg: &Registry, ctx: &Ctx, opts: &DiscoverOptions) -> Result<Dis
                     v.insert("args".into(), json!(t.args));
                 }
             }
-            let secret_names: Vec<&String> = t.env.keys().chain(t.headers.keys()).collect();
-            if !secret_names.is_empty() {
-                v.insert("env".into(), json!(secret_names));
+            // secrets by name only: environment variables, and headers for remote servers
+            if !t.env.is_empty() {
+                v.insert("env".into(), json!(t.env.keys().collect::<Vec<_>>()));
+            }
+            if !t.headers.is_empty() {
+                v.insert("headers".into(), json!(t.headers.keys().collect::<Vec<_>>()));
             }
             let scope = t.scope.clone().unwrap_or_default();
             let off = if t.enabled == Some(false) { ", disabled" } else { "" };
@@ -492,7 +495,7 @@ fn inline(v: &Value) -> String {
         Value::Array(a) => format!("[{}]", a.iter().map(inline).collect::<Vec<_>>().join(", ")),
         Value::Object(m) => {
             // the identifying key first (`path`, `git`, `mcp`, …), then the rest
-            const ORDER: &[&str] = &["mcp", "url", "transport", "command", "args", "git", "rev", "path", "editable", "env"];
+            const ORDER: &[&str] = &["mcp", "url", "transport", "command", "args", "git", "rev", "path", "editable", "env", "headers"];
             let mut keys: Vec<&String> = m.keys().filter(|k| !m[*k].is_null()).collect();
             keys.sort_by_key(|k| ORDER.iter().position(|o| o == k).unwrap_or(ORDER.len()));
             format!("{{ {} }}", keys.iter().map(|k| format!("{} = {}", key(k), inline(&m[*k]))).collect::<Vec<_>>().join(", "))

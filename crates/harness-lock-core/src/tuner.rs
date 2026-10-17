@@ -15,6 +15,9 @@ use crate::store::Store;
 use crate::tasks::TaskPack;
 use crate::worker::{Backend, PythonAdapter};
 
+/// The most stacks one resolve evaluates.
+pub const MAX_STACKS: usize = 200;
+
 /// Aggregated metrics container produced by the tuner.
 
 pub struct Tuner {
@@ -29,6 +32,12 @@ pub struct Tuner {
     pub harness_override: Option<String>,
     /// Code harnesses (`[harnesses.<id>]`) that trials run through their entrypoint.
     code_harnesses: BTreeMap<String, crate::profiles::HarnessProfile>,
+    /// Skip network lookups when locking declared peripherals.
+    pub offline: bool,
+    /// Files the last lock vendors next to itself (`.hlock/vendor/…`).
+    pub vendor: Vec<crate::capture::VendorFile>,
+    /// Non-fatal problems from the last run (unpinned versions, unresolved refs).
+    pub warnings: Vec<String>,
 }
 
 impl Tuner {
@@ -58,6 +67,9 @@ impl Tuner {
             holdout: Vec::new(),
             harness_override: None,
             code_harnesses: BTreeMap::new(),
+            offline: false,
+            vendor: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -118,10 +130,16 @@ impl Tuner {
                 }
             }
         }
-        if stacks.len() > 200 {
-            stacks.truncate(200);
+        if stacks.len() > MAX_STACKS {
+            stacks.truncate(MAX_STACKS);
         }
         stacks
+    }
+
+    /// How many stacks the candidate axes produce before the cap.
+    pub fn enumerate_all(&self) -> usize {
+        let c = &self.manifest.candidates;
+        llm_combos(&c.llm).len() * c.decision.len().max(1) * harness_combos(&c.harness).len()
     }
 
     /// Run one trial (copying fixtures, running the harness, grading).
@@ -173,15 +191,18 @@ impl Tuner {
         }
     }
 
-    /// Tune: enumerate, run, aggregate, select, and write `harness.lock`.
+    /// Tune: enumerate, run, aggregate, select, and write `harness.lock` (with any
+    /// vendored files beside it).
     pub fn tune(&mut self) -> Result<Lockfile> {
         let lock = self.tune_lock()?;
-        lock.save(std::path::Path::new(crate::LOCKFILE_PATH))?;
+        let path = self.manifest.root().join(crate::LOCKFILE_PATH);
+        lock.save(&path)?;
+        crate::capture::write_vendor(&self.manifest.root(), &self.vendor)?;
         Ok(lock)
     }
 
-    /// Tune and return the winning lock without writing it.
-    pub fn tune_lock(&mut self) -> Result<Lockfile> {
+    /// Resolve the target harness and register code harnesses.
+    fn prepare(&mut self) -> Result<Registry> {
         let registry = Registry::load_for(&Ctx::from_process(), Some(&self.manifest))?;
         apply_target(&mut self.manifest, self.harness_override.as_deref(), &registry)?;
         self.code_harnesses = registry
@@ -190,6 +211,63 @@ impl Tuner {
             .filter(|h| h.kind == "custom" && (h.run.entrypoint.is_some() || !h.run.command.is_empty()))
             .map(|h| (h.id.clone(), h.clone()))
             .collect();
+        Ok(registry)
+    }
+
+    fn adapter_for(&self, harness: &str) -> String {
+        if self.code_harnesses.contains_key(harness) { harness.to_string() } else { self.adapter.name().to_string() }
+    }
+
+    /// What `tune_lock` would do, without running anything: the search space, the
+    /// trial count, which adapter runs each harness, and the peripherals to lock.
+    pub fn plan(&mut self) -> Result<serde_json::Value> {
+        let registry = self.prepare()?;
+        let search_tasks = self.load_packs();
+        let full = self.enumerate_all();
+        let stacks = self.enumerate_stacks();
+        let seeds = self.manifest.seeds();
+        let per_budget = stacks.len() * search_tasks.len() * seeds as usize;
+        let max = self.manifest.budget.max_trials;
+        let trials = max.map(|m| m.min(per_budget)).unwrap_or(per_budget);
+        let c = &self.manifest.candidates;
+        let harnesses: Vec<String> = harness_combos(&c.harness).into_iter().map(|(h, _)| h).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        let adapters: BTreeMap<String, String> = harnesses.iter().map(|h| (h.clone(), self.adapter_for(h))).collect();
+        let target = harnesses.first().and_then(|h| registry.harness(h));
+        let llm: BTreeMap<String, Vec<String>> = llm_combos(&c.llm)
+            .iter()
+            .flat_map(|m| m.iter().map(|(r, s)| (r.clone(), s.clone())))
+            .fold(BTreeMap::new(), |mut acc: BTreeMap<String, Vec<String>>, (r, s)| {
+                let e = acc.entry(r).or_default();
+                if !e.contains(&s) {
+                    e.push(s);
+                }
+                acc
+            });
+        let decisions = if c.decision.is_empty() { vec!["none".to_string()] } else { c.decision.clone() };
+        Ok(serde_json::json!({
+            "manifest": self.manifest.source_path,
+            "backend": self.backend.as_str(),
+            "llm": llm,
+            "harnesses": harnesses,
+            "adapters": adapters,
+            "decisions": decisions,
+            "stacks": stacks.len(),
+            "stacks-truncated": full > stacks.len(),
+            "tasks": search_tasks.len(),
+            "holdout-tasks": self.holdout.len(),
+            "seeds": seeds,
+            "trials": trials,
+            "max-trials": max,
+            "peripherals": crate::peripherals::summarize(&self.manifest, target, &Ctx::at(&self.manifest.root())),
+        }))
+    }
+
+    /// Tune and return the winning lock without writing it. Vendored files and
+    /// warnings are left in `self.vendor` and `self.warnings`.
+    pub fn tune_lock(&mut self) -> Result<Lockfile> {
+        let registry = self.prepare()?;
+        self.vendor.clear();
+        self.warnings.clear();
         let search_tasks = self.load_packs();
         let stacks = self.enumerate_stacks();
         let seeds = self.manifest.seeds();
@@ -238,7 +316,16 @@ impl Tuner {
         )
         .ok_or_else(|| Error::Tuning("no viable stack found".into()))?;
 
-        let lock = self.build_resolve(&winner, &scores);
+        let mut lock = self.build_resolve(&winner, &scores);
+        // pin what the manifest declares, so the lock can be synced and launched
+        let target = registry.harness(&lock.harness.name);
+        let locked = crate::peripherals::lock_peripherals(&self.manifest, target, &Ctx::at(&self.manifest.root()), self.offline)?;
+        lock.tool = locked.tools;
+        lock.skill = locked.skills;
+        lock.instructions = locked.instructions;
+        lock.secret = locked.secrets;
+        self.vendor = locked.vendor;
+        self.warnings = locked.warnings;
         let _ = self.write_report(&lock, &scores);
         Ok(lock)
     }
@@ -330,7 +417,7 @@ impl Tuner {
             let probe = probe_harness(profile, &ctx);
             h.version = probe.version;
             h.source = probe.source;
-            h.adapter = Some(if self.code_harnesses.contains_key(name) { name.to_string() } else { self.adapter.name().to_string() });
+            h.adapter = Some(self.adapter_for(name));
         }
         h
     }

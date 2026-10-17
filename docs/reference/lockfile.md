@@ -79,7 +79,7 @@ the complete file.
 | `[harness]` | Harness `name` and `pattern`. For a harness with a profile, also the installed `version`, its install `source` (e.g. `brew-cask:claude-code@2.1.285`), and the `adapter` that ran the trials. |
 | `[policy]` | `retries`, `max-steps`, `human-approval`, `risky-actions`, `tool-allowlist`, `sandbox` |
 | `[context]` | Context `isolation` and `compaction` settings |
-| `tool`, `skill`, `instructions` | Locked peripherals (reserved in v0.1) |
+| `tool`, `skill`, `instructions` | The manifest's declared MCP servers (launch command, pinned package, secret placeholders), skills (digest, source, vendored copy) and instruction files (digest). See [`[tools]`](manifest.md#tools). |
 | `[evidence]` | The task pack and split measured, the trial count, and success-rate, cost, and latency statistics |
 | `[verify]` | Runtime verification thresholds: `canary-tasks`, `min-success-rate`, `fingerprint-tolerance` |
 | `[provenance]` | The backend that produced the lock, and the search settings |

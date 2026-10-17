@@ -281,13 +281,14 @@ fn object_of(v: &serde_json::Value) -> std::collections::BTreeMap<String, serde_
 #[pyclass(module = "harness_lock", name = "Lockfile")]
 pub struct PyLockfile {
     inner: core::Lockfile,
+    warnings: Vec<String>,
 }
 
 #[pymethods]
 impl PyLockfile {
     #[staticmethod]
     fn load(path: &str) -> PyResult<PyLockfile> {
-        core::Lockfile::load(Path::new(path)).map(|inner| PyLockfile { inner }).map_err(py_err)
+        core::Lockfile::load(Path::new(path)).map(|inner| PyLockfile { inner, warnings: Vec::new() }).map_err(py_err)
     }
 
     fn summary(&self) -> String {
@@ -296,6 +297,13 @@ impl PyLockfile {
 
     fn to_json(&self) -> String {
         serde_json::to_string(&self.inner).unwrap_or_default()
+    }
+
+    /// Non-fatal problems from the resolve that wrote this lock (unpinned versions,
+    /// unresolved git refs). Empty for a lock loaded from disk.
+    #[getter]
+    fn warnings(&self) -> Vec<String> {
+        self.warnings.clone()
     }
 
     #[getter]
@@ -398,7 +406,7 @@ impl PyLockedAgent {
 // module functions
 // --------------------------------------------------------------------------- //
 #[pyfunction]
-#[pyo3(signature = (manifest=None, backend=None, workdir=None, harness=None, lock=None))]
+#[pyo3(signature = (manifest=None, backend=None, workdir=None, harness=None, lock=None, offline=false))]
 fn resolve(
     py: Python<'_>,
     manifest: Option<PyObject>,
@@ -406,6 +414,7 @@ fn resolve(
     workdir: Option<String>,
     harness: Option<String>,
     lock: Option<String>,
+    offline: bool,
 ) -> PyResult<PyLockfile> {
     let core_manifest = resolve_manifest(py, manifest, backend.as_deref())?;
     let root = core_manifest.root();
@@ -414,9 +423,25 @@ fn resolve(
     let backend = core::Backend::parse(core_manifest.backend_target().as_str());
     let mut tuner = core::Tuner::with_backend(core_manifest, &wd, backend);
     tuner.harness_override = harness;
+    tuner.offline = offline;
     let lf = tuner.tune_lock().map_err(py_err)?;
     lf.save(&lock).map_err(py_err)?;
-    Ok(PyLockfile { inner: lf })
+    let base = lock.parent().map(Path::to_path_buf).unwrap_or(root);
+    core::capture::write_vendor(&base, &tuner.vendor).map_err(py_err)?;
+    Ok(PyLockfile { inner: lf, warnings: tuner.warnings.clone() })
+}
+
+/// What `resolve` would do, without running anything, as JSON: the search space,
+/// trial count, adapters, and the peripherals it would lock.
+#[pyfunction]
+#[pyo3(signature = (manifest=None, backend=None, harness=None))]
+fn resolve_plan(py: Python<'_>, manifest: Option<PyObject>, backend: Option<String>, harness: Option<String>) -> PyResult<String> {
+    let m = resolve_manifest(py, manifest, backend.as_deref())?;
+    let wd = m.root().join(".harnesslock");
+    let b = core::Backend::parse(m.backend_target().as_str());
+    let mut tuner = core::Tuner::with_backend(m, &wd, b);
+    tuner.harness_override = harness;
+    Ok(json_str(tuner.plan().map_err(py_err)?))
 }
 
 #[pyfunction]
@@ -872,6 +897,7 @@ fn _harness_lock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLockfile>()?;
     m.add_class::<PyLockedAgent>()?;
     m.add_function(wrap_pyfunction!(resolve, m)?)?;
+    m.add_function(wrap_pyfunction!(resolve_plan, m)?)?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
     m.add_function(wrap_pyfunction!(upgrade, m)?)?;
     m.add_function(wrap_pyfunction!(optimize, m)?)?;

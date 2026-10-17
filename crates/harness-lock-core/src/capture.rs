@@ -271,6 +271,59 @@ pub fn looks_secret(v: &str) -> bool {
     charset && digits && upper && lower
 }
 
+/// The `HLOCK_SECRET_…` variable name for a location, e.g. `["github", "GITHUB_TOKEN"]`
+/// → `HLOCK_SECRET_GITHUB_GITHUB_TOKEN` (the same names `pin` uses).
+pub fn secret_var(context: &[&str]) -> String {
+    let mut raw = String::from("HLOCK_SECRET");
+    for part in context {
+        raw.push('_');
+        raw.push_str(part);
+    }
+    let mut name = String::new();
+    let mut last_us = false;
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() {
+            name.push(c.to_ascii_uppercase());
+            last_us = false;
+        } else if !last_us {
+            name.push('_');
+            last_us = true;
+        }
+    }
+    let mut name = name.trim_end_matches('_').to_string();
+    name.truncate(64);
+    name
+}
+
+/// Write vendored files under `base`, replacing each harness's previous vendor
+/// directory. Returns the paths written (relative to `base`).
+pub fn write_vendor(base: &Path, files: &[VendorFile]) -> Result<Vec<String>> {
+    let mut cleared = BTreeSet::new();
+    let mut written = Vec::new();
+    for f in files {
+        // .hlock/vendor/<harness>/… — clear each <harness> dir once
+        let mut parts = f.rel.splitn(4, '/');
+        if let (Some(a), Some(b), Some(h)) = (parts.next(), parts.next(), parts.next()) {
+            let dir = base.join(a).join(b).join(h);
+            if cleared.insert(dir.clone()) {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+        let dest = base.join(&f.rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, &f.bytes)?;
+        #[cfg(unix)]
+        if f.executable {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+        }
+        written.push(f.rel.clone());
+    }
+    Ok(written)
+}
+
 /// Collects placeholders for the secrets a capture redacts.
 #[derive(Default)]
 struct Secrets {
@@ -280,24 +333,7 @@ struct Secrets {
 
 impl Secrets {
     fn placeholder_name(&self, context: &[&str]) -> String {
-        let mut raw = String::from("HLOCK_SECRET");
-        for part in context {
-            raw.push('_');
-            raw.push_str(part);
-        }
-        let mut name = String::new();
-        let mut last_us = false;
-        for c in raw.chars() {
-            if c.is_ascii_alphanumeric() {
-                name.push(c.to_ascii_uppercase());
-                last_us = false;
-            } else if !last_us {
-                name.push('_');
-                last_us = true;
-            }
-        }
-        let mut name = name.trim_end_matches('_').to_string();
-        name.truncate(64);
+        let mut name = secret_var(context);
         let base = name.clone();
         let mut n = 2;
         while self.refs.iter().any(|r| r.name == name) {
@@ -435,7 +471,7 @@ pub fn portable_path(p: &Path, root: Option<&Path>, ctx: &Ctx) -> String {
     p.to_string_lossy().into_owned()
 }
 
-fn is_project_path(p: &Path, ctx: &Ctx) -> bool {
+pub(crate) fn is_project_path(p: &Path, ctx: &Ctx) -> bool {
     p.starts_with(&ctx.cwd) && !ctx.home.starts_with(&ctx.cwd)
 }
 
@@ -494,7 +530,7 @@ pub fn tree_digest(dir: &Path) -> String {
 
 const MAX_VENDOR_BYTES: u64 = 20 * 1024 * 1024;
 
-fn vendor_tree(dir: &Path, dest: &str, out: &mut Vec<VendorFile>) -> std::result::Result<(), String> {
+pub(crate) fn vendor_tree(dir: &Path, dest: &str, out: &mut Vec<VendorFile>) -> std::result::Result<(), String> {
     let files = walk_files(dir);
     let total: u64 = files.iter().filter_map(|f| std::fs::metadata(dir.join(f)).ok()).map(|m| m.len()).sum();
     if total > MAX_VENDOR_BYTES {

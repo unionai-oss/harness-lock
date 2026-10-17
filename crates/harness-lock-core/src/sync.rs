@@ -63,6 +63,9 @@ pub enum Action {
     Run { argv: Vec<String>, env: BTreeMap<String, String> },
     /// Move a path aside to `<path>.hlock-bak`.
     Remove { path: PathBuf },
+    /// Write MCP servers (in the harness's shape) at `pointer` in a config file;
+    /// secret placeholders are filled from the environment or the file's existing values.
+    WriteMcp { path: PathBuf, format: String, pointer: String, servers: Value },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -480,6 +483,45 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
             action: (!same).then(|| Action::WriteConfig { path: target.clone(), vendored, format: c.format.clone(), pointers: c.pointers.clone(), fallback }),
             ..Default::default()
         });
+    }
+
+    // ---- MCP servers a resolved lock declares (pinned locks restore them through config) ----
+    let declared: Vec<&crate::lockfile::Tool> = lock.tool.iter().filter(|x| x.kind == "mcp").collect();
+    let restores_config = lock.config.iter().any(|c| c.restore != "record");
+    if !declared.is_empty() && !restores_config && profile.kind == "cli" {
+        match profile.mcp.write.as_deref().and_then(|w| w.split_once('#')) {
+            Some((file, ptr)) => {
+                let format = profile.files.get(file).map(|f| f.format.clone()).unwrap_or_else(|| "json".into());
+                let path = profile.file_path(file, &t).unwrap_or_default();
+                let shape = profile.mcp.shape.as_deref().unwrap_or("standard");
+                let servers = Value::Object(declared.iter().map(|x| (x.name.clone(), crate::launch::mcp_entry(x, shape))).collect());
+                collect_placeholders(&servers, &mut all_secrets);
+                let actual = read_config(&path, &format).ok().flatten();
+                let current = actual.as_ref().and_then(|a| a.pointer(ptr));
+                let mut missing = BTreeSet::new();
+                let filled = fill(&servers, current, &t.env, &mut missing);
+                missing_secrets.extend(missing);
+                let same = current == Some(&filled);
+                let n = declared.len();
+                steps.push(Step {
+                    id: "mcp-servers".into(),
+                    kind: "config".into(),
+                    title: format!("{} {n} MCP server{} in {}", if same { "" } else { "Write" }, if n == 1 { "" } else { "s" }, pretty(&path, ctx)).trim().to_string(),
+                    status: if same { "satisfied" } else { "auto" }.into(),
+                    reason: if same { "matches the lock".into() } else { String::new() },
+                    action: (!same).then(|| Action::WriteMcp { path, format, pointer: ptr.to_string(), servers }),
+                    ..Default::default()
+                });
+            }
+            None => steps.push(Step {
+                id: "mcp-servers".into(),
+                kind: "config".into(),
+                title: format!("{} MCP servers", declared.len()),
+                status: "manual".into(),
+                reason: format!("hlock doesn't know where {} keeps MCP servers; add them by hand", profile.name),
+                ..Default::default()
+            }),
+        }
     }
 
     // ---- skills ----
@@ -905,6 +947,25 @@ pub fn run_step(step: &Step, ctx: &Ctx) -> Result<String> {
                 let tail: Vec<&str> = text.lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
                 Err(Error::Profile(format!("`{}` exited with {}:\n{}", shell_join(argv), out.status, tail.join("\n"))))
             }
+        }
+        Action::WriteMcp { path, format, pointer, servers } => {
+            let mut doc = read_config(path, format)?.filter(Value::is_object).unwrap_or_else(|| json!({}));
+            let mut missing = BTreeSet::new();
+            let filled = fill(servers, doc.pointer(pointer), &ctx.env, &mut missing);
+            set_pointer(&mut doc, pointer, filled);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if path.exists() {
+                std::fs::copy(path, format!("{}.hlock-bak", path.display()))?;
+            }
+            let fmt = if format == "jsonc" { "json" } else { format.as_str() };
+            std::fs::write(path, render_config(&doc, fmt).map_err(Error::Profile)?)?;
+            let mut msg = format!("wrote MCP servers to {}", path.display());
+            if !missing.is_empty() {
+                msg.push_str(&format!("; placeholders left for {}", missing.into_iter().collect::<Vec<_>>().join(", ")));
+            }
+            Ok(msg)
         }
         Action::Remove { path } => {
             let bak = backup(path)?;
