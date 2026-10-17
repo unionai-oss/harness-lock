@@ -220,6 +220,9 @@ pub struct SkillsSpec {
     pub builtin_dirs: Vec<String>,
     /// A file listing the harness's bundled skills, one per line or as keys.
     pub builtin_manifest: Option<String>,
+    /// Directories the harness keeps in sync itself (e.g. skills synced from an account);
+    /// recorded with `origin = "harness-managed"`, never vendored or restored.
+    pub managed_dirs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

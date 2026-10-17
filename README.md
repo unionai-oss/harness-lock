@@ -57,7 +57,7 @@ No accounts or API keys needed. The built-in `reference` provider and harness ar
 deterministic and offline, so the whole loop runs on a laptop.
 
 ```bash
-hlock init --name demo --pack ./tasks   # write a starter harness.toml
+hlock init --template --pack ./tasks   # write the offline starter harness.toml
 hlock resolve                           # tune the search space -> harness.lock
 hlock check                             # fail if harness.toml drifted from the lock
 hlock run "clean ./data/orders.csv"     # run the locked agent
@@ -79,6 +79,7 @@ servers, skills, plugins, and config, with secrets replaced by placeholders.
 
 ```bash
 hlock harness list      # the harnesses on this machine, and the one you're running inside
+hlock init              # build a harness.toml from your setup, choosing what goes in
 hlock pin               # lock your current setup into harness.lock
 hlock check             # fail if your setup drifted from the pin
 hlock sync              # on another machine: rehydrate it (also --prefix DIR, --docker)
@@ -86,7 +87,8 @@ hlock launch            # start a session that matches the lock (or: hlock launc
 hlock localize          # an all-local equivalent: local harness + Ollama/LM Studio models
 ```
 
-See [Harnesses](https://unionai-oss.github.io/hlock/guides/harnesses/) and
+See [Starting from your setup](https://unionai-oss.github.io/hlock/guides/init/),
+[Harnesses](https://unionai-oss.github.io/hlock/guides/harnesses/),
 [Pinning your setup](https://unionai-oss.github.io/hlock/guides/pin/),
 [Rehydrating with sync](https://unionai-oss.github.io/hlock/guides/sync/), and
 [Launching a locked harness](https://unionai-oss.github.io/hlock/guides/launch/).

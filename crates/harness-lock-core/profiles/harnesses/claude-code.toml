@@ -58,6 +58,7 @@ write = "state#/mcpServers"
 [skills]
 dirs = ["{root}/skills", ".claude/skills"]
 write = "{root}/skills"
+managed-dirs = ["{root}/skills/synced"]   # synced from your Claude account
 
 [[bundles]]
 kind = "plugin"

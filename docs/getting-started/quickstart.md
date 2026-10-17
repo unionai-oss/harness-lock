@@ -21,10 +21,14 @@ expected output artifact.
 ## 2. Write a manifest
 
 ```console
-$ hlock init --name demo --pack ./tasks
-✓ wrote harness.toml  (project 'demo', task pack ./tasks)
+$ hlock init --template --name demo --pack ./tasks
+✓ wrote harness.toml  (starter template, task pack ./tasks)
 next → hlock resolve
 ```
+
+`--template` writes a small starter that uses hlock's offline reference models. Without it,
+`hlock init` scans the agent harness you already use and builds the manifest from that; see
+[Starting from your setup](../guides/init.md).
 
 `harness.toml` is the [manifest](../reference/manifest.md). It declares what the resolver
 may try and what "best" means:

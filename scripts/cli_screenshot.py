@@ -24,7 +24,7 @@ REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "docs" / "assets" / "quickstart.svg"
 
 SESSION = [
-    ["init", "--name", "demo", "--pack", "./tasks"],
+    ["init", "--template", "--name", "demo", "--pack", "./tasks"],
     ["resolve"],
     ["check"],
     ["run", "clean ./data/orders.csv"],

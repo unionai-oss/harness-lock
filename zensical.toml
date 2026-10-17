@@ -25,6 +25,7 @@ nav = [
     "concepts/architecture.md",
   ] },
   { "Guides" = [
+    "guides/init.md",
     "guides/harnesses.md",
     "guides/pin.md",
     "guides/sync.md",

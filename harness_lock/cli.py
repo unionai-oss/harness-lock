@@ -17,6 +17,7 @@ from pathlib import Path
 
 import rich_click as click
 from rich.console import Console, Group
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -30,6 +31,8 @@ from harness_lock import (
     __version__,
     harness_profile,
     harnesses,
+    init_discover,
+    init_render,
     launch_prepare,
     load,
     run_code_harness,
@@ -56,6 +59,7 @@ class _Project:
 
     manifest: Path = Path(MANIFEST)
     lock: Path = Path(LOCK)
+    explicit: bool = False  # set with -m / HLOCK_MANIFEST
 
 
 def _find_up(name: str, start: Path) -> Path | None:
@@ -82,6 +86,7 @@ def _set_project(manifest: str | None, lock: str | None) -> None:
         lk = _find_up(LOCK, cwd) or cwd / LOCK
     _Project.manifest = m if m is not None else cwd / MANIFEST
     _Project.lock = lk
+    _Project.explicit = manifest is not None
 
 
 def _m() -> str:
@@ -361,35 +366,156 @@ def main(manifest: str | None, lock_path: str | None) -> None:
     _set_project(manifest, lock_path)
 
 
+def _parse_toggles(answer: str, n: int) -> set[int] | str | None:
+    """`1 3 5-7` -> indices; `a`/`n` -> "all"/"none"; None on bad input."""
+    a = answer.strip().lower()
+    if a in ("a", "all"):
+        return "all"
+    if a in ("n", "none"):
+        return "none"
+    out: set[int] = set()
+    for tok in a.replace(",", " ").split():
+        lo, _, hi = tok.partition("-")
+        if not lo.isdigit() or (hi and not hi.isdigit()):
+            return None
+        for k in range(int(lo), int(hi or lo) + 1):
+            if not 1 <= k <= n:
+                return None
+            out.add(k - 1)
+    return out
+
+
+def _choose(sections: list[dict]) -> dict[str, list[str]]:
+    """Ask about each section; returns the chosen item ids per section."""
+    picks: dict[str, list[str]] = {}
+    for sec in sections:
+        items = sec["items"]
+        chosen = {i["id"] for i in items if i["selected"]}
+        while True:
+            console.print(f"[bold]{escape(sec['title'])}[/]  [muted]{escape(sec['help'])}[/]")
+            t = Table(box=None, show_header=False, pad_edge=False)
+            t.add_column("", justify="right", style="muted")
+            t.add_column("")
+            t.add_column("", style="key")
+            t.add_column("", style="muted", overflow="fold")
+            for k, it in enumerate(items, 1):
+                mark = ("[ok]●[/]" if it["id"] in chosen else "○") if sec["single"] else (
+                    "[ok]✓[/]" if it["id"] in chosen else "·")
+                t.add_row(str(k), mark, escape(it["label"]), escape(it["detail"]))
+            console.print(t)
+            if sec["single"]:
+                ans = click.prompt("  pick a number, Enter keeps ●", default="", show_default=False)
+                if not ans.strip():
+                    break
+                if ans.strip().isdigit() and 1 <= int(ans) <= len(items):
+                    chosen = {items[int(ans) - 1]["id"]}
+                    break
+                console.print("  [warn]enter one number[/]")
+                continue
+            ans = click.prompt("  toggle numbers (1 3 5-7), a = all, n = none, Enter = done", default="",
+                               show_default=False)
+            if not ans.strip():
+                break
+            parsed = _parse_toggles(ans, len(items))
+            if parsed is None:
+                console.print("  [warn]use numbers from the list, ranges like 2-4, a, or n[/]")
+            elif parsed == "all":
+                chosen = {i["id"] for i in items}
+            elif parsed == "none":
+                chosen = set()
+            else:
+                for k in parsed:
+                    chosen ^= {items[k]["id"]}
+        console.print()
+        picks[sec["key"]] = [i["id"] for i in items if i["id"] in chosen]
+    return picks
+
+
 @main.command()
-@click.option("--name", default="demo", show_default=True, help="Project name for the manifest.")
-@click.option("--pack", default="./tasks", show_default=True, help="Path to a task pack directory.")
+@click.option("--dir", "scan_dir", default=None, metavar="DIR",
+              help="Project to scan and write harness.toml into.  [dim]\\[default: the current directory][/]")
 @click.option("--harness", "harness", default=None,
-              help="Target harness for \\[target]. [dim]\\[default: the one you're running in, if any][/]")
+              help="Harness to scan.  [dim]\\[default: the one you're running in, or the only one installed][/]")
+@click.option("--pack", "packs", multiple=True, help="Task pack directory (repeatable).  [dim]\\[default: scan for pack.toml][/]")
+@click.option("--name", default=None, help="Project name.  [dim]\\[default: the directory name][/]")
+@click.option("-y", "--yes", is_flag=True, help="Accept the suggested choices without asking.")
+@click.option("--interactive/--no-interactive", default=None, help="Ask about each section.  [dim]\\[default: on a terminal][/]")
+@click.option("--memory-gb", type=float, default=None, help="Memory budget for suggesting local models.  [dim]\\[default: measured][/]")
+@click.option("--template", is_flag=True, help="Write the minimal starter manifest without scanning.")
+@click.option("--dry-run", is_flag=True, help="Print the manifest instead of writing it.")
+@click.option("--json", "as_json", is_flag=True, help="Print what the scan found as JSON and write nothing.")
 @click.option("--force", is_flag=True, help="Overwrite an existing harness.toml.")
-def init(name: str, pack: str, harness: str | None, force: bool) -> None:
-    """Write a starter [path]harness.toml[/] manifest."""
-    p = Path(_m())
-    if p.exists() and not force:
-        _fail(f"{_md()} already exists", "pass [cmd]--force[/] to overwrite it")
-    target = None
-    if harness:
-        with _friendly_errors():
-            target = json.loads(_select_harness(harness, manifest=_m()))
-    else:
-        # Only an unambiguous signal (running inside a harness) picks one silently.
-        try:
-            sel = json.loads(_select_harness(manifest=_m()))
-            target = sel if sel["reason"] == "running inside it" else None
-        except ValueError:
-            target = None
-    p.write_text(_default_manifest(name, pack, target["id"] if target else None))
-    _ok(f"wrote [path]{_show(p)}[/]  [muted](project {name!r}, task pack {pack})[/]")
+def init(scan_dir: str | None, harness: str | None, packs: tuple[str, ...], name: str | None, yes: bool,
+         interactive: bool | None, memory_gb: float | None, template: bool, dry_run: bool, as_json: bool,
+         force: bool) -> None:
+    """Write a [path]harness.toml[/] from what you already use.
+
+    Scans the target harness (its models and providers, MCP servers, skills, plugins and
+    instruction files), installed local runtimes and the models that fit in memory, API keys
+    in your environment (by name only), other installed harnesses, and the project directory
+    (skills, instruction files, task packs, agent frameworks). On a terminal it asks about
+    each section, with what's in use today pre-checked; [cmd]--yes[/] takes the suggestions.
+    """
+    root = Path(scan_dir).expanduser().resolve() if scan_dir else Path.cwd()
+    p = Path(_m()) if _Project.explicit else root / MANIFEST
+    if p.exists() and not (force or dry_run or as_json):
+        _fail(f"{_show(p)} already exists", "pass [cmd]--force[/] to overwrite it, or [cmd]--dry-run[/] to preview")
+
+    if template:
+        pack = packs[0] if packs else "./tasks"
+        target = None
+        if harness:
+            with _friendly_errors():
+                target = json.loads(_select_harness(harness, manifest=_m()))
+        else:  # only an unambiguous signal (running inside a harness) picks one silently
+            try:
+                sel = json.loads(_select_harness(manifest=_m()))
+                target = sel if sel["reason"] == "running inside it" else None
+            except ValueError:
+                target = None
+        text = _default_manifest(name or "demo", pack, target["id"] if target else None)
+        if dry_run:
+            sys.stdout.write(text)
+            return
+        p.write_text(text)
+        _ok(f"wrote [path]{_show(p)}[/]  [muted](starter template, task pack {pack})[/]")
+        if not (root / pack / "pack.toml").exists():
+            console.print(f"[warn]![/] no [path]pack.toml[/] found in [path]{pack}[/]; add one before resolving")
+        _next("hlock resolve")
+        return
+
+    with _working(f"Scanning {_show(root) if scan_dir else 'this project'} and your harness…"):
+        discovery = json.loads(init_discover(str(root), harness=harness, memory_gb=memory_gb, packs=list(packs)))
+    if as_json:
+        console.print_json(data=discovery)
+        return
+    if interactive is None:
+        interactive = sys.stdin.isatty() and not yes and not dry_run
+    target = discovery.get("target")
     if target:
-        console.print(f"[key]target[/] [bold]{target['id']}[/]  [muted]({target['reason']})[/]")
-    if not (Path(pack) / "pack.toml").exists():
-        console.print(f"[warn]![/] no [path]pack.toml[/] found in [path]{pack}[/]; add one before resolving")
-    _next("hlock resolve")
+        console.print(f"[key]scanning[/] [bold]{target['id']}[/]  [muted]({target['reason']})[/]\n")
+    picks = _choose(discovery["sections"]) if interactive else {}
+    text = init_render(json.dumps(discovery), json.dumps(picks), name=name)
+    if dry_run:
+        sys.stdout.write(text)
+        return
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text)
+
+    nouns = {"llm": ("model", "models"), "harness": ("harness", "harnesses"),
+             "decision": ("decision model", "decision models"), "tools": ("MCP server", "MCP servers"),
+             "skills": ("skill", "skills"), "instructions": ("instruction file", "instruction files"),
+             "tasks": ("task pack", "task packs"), "code": ("agent stub", "agent stubs")}
+    counts = []
+    for sec in discovery["sections"]:
+        ids = picks.get(sec["key"], [i["id"] for i in sec["items"] if i["selected"]])
+        if sec["key"] in nouns and ids:
+            one, many = nouns[sec["key"]]
+            counts.append(f"{len(ids)} {one if len(ids) == 1 else many}")
+    _ok(f"wrote [path]{_show(p)}[/]" + (f"  [muted]({', '.join(counts)})[/]" if counts else ""))
+    for note in discovery["notes"]:
+        console.print(f"[warn]![/] {escape(note)}")
+    _next(f"review {_show(p)}", "hlock resolve")
 
 
 @main.command()

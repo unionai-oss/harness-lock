@@ -28,6 +28,10 @@ def project(tmp_path, monkeypatch):
     shutil.copytree(REPO / "tasks", tmp_path / "tasks")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("NO_COLOR", "1")
+    # hermetic: init scans the home directory and PATH for harnesses and runtimes
+    (tmp_path / "home").mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PATH", f"/usr/bin{os.pathsep}/bin")
     return tmp_path
 
 

@@ -208,7 +208,7 @@ fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>,
     if let Some(write) = &target.skills.write {
         let dir = t.expand(write, Some(root));
         let mut copied = 0;
-        for s in lock.skill.iter().filter(|s| !matches!(s.origin.as_str(), "harness-builtin" | "bundled")) {
+        for s in lock.skill.iter().filter(|s| !matches!(s.origin.as_str(), "harness-builtin" | "bundled" | "harness-managed")) {
             let src = s
                 .vendored
                 .as_ref()
@@ -230,7 +230,7 @@ fn translate(lock: &Lockfile, lock_path: &Path, source: Option<&HarnessProfile>,
         if copied > 0 {
             prep.done.push(format!("copied {copied} skill{} to {}", if copied == 1 { "" } else { "s" }, pretty(&dir, ctx)));
         }
-        let skipped = lock.skill.iter().filter(|s| matches!(s.origin.as_str(), "harness-builtin" | "bundled")).count();
+        let skipped = lock.skill.iter().filter(|s| matches!(s.origin.as_str(), "harness-builtin" | "bundled" | "harness-managed")).count();
         if skipped > 0 {
             prep.notes.push(format!("{skipped} skills that ship with the source harness or its plugins don't carry over"));
         }

@@ -1069,6 +1069,7 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
     let mut seen = BTreeSet::new();
     let builtins = builtin_names(profile, &root, ctx);
     let builtin_dirs: Vec<PathBuf> = profile.skills.builtin_dirs.iter().map(|d| ctx.expand(d, Some(&root))).collect();
+    let managed_dirs: Vec<PathBuf> = profile.skills.managed_dirs.iter().map(|d| ctx.expand(d, Some(&root))).collect();
     let dirs: Vec<(PathBuf, bool)> = profile
         .skills
         .dirs
@@ -1094,7 +1095,10 @@ pub fn capture(profile: &HarnessProfile, reg: &Registry, ctx: &Ctx, project: Opt
                 ..Default::default()
             };
             let realstr = real.to_string_lossy();
-            if is_builtin_dir || builtin_dirs.iter().any(|b| sk.starts_with(b)) || builtins.contains(&name) {
+            if managed_dirs.iter().any(|m| sk.starts_with(m)) {
+                s.origin = "harness-managed".into();
+                s.provided_by = Some(format!("harness:{}", profile.id));
+            } else if is_builtin_dir || builtin_dirs.iter().any(|b| sk.starts_with(b)) || builtins.contains(&name) {
                 s.origin = "harness-builtin".into();
                 s.provided_by = Some(format!("harness:{}", profile.id));
             } else if realstr.contains("/plugins/") || realstr.contains("/node_modules/") {
@@ -1247,6 +1251,24 @@ fn vendor_skill(dir: &Path, vroot: &str, name: &str, s: &mut Skill, vendor: &mut
         Ok(()) => s.vendored = Some(dest),
         Err(e) => warnings.push(format!("skill {name}: {e}")),
     }
+}
+
+/// Every model a harness has configured under its providers, as
+/// `(provider, model, base_url)` (Pi's `models.json`, OpenCode's `provider`, …).
+pub(crate) fn configured_provider_models(profile: &HarnessProfile, ctx: &Ctx) -> Vec<(String, String, Option<String>)> {
+    let Some(spec) = &profile.providers else { return vec![] };
+    let src = Sources::new(profile, ctx);
+    let mut out = Vec::new();
+    for s in &spec.source {
+        let Some(Value::Object(providers)) = src.get(s) else { continue };
+        for (name, entry) in &providers {
+            let base = spec.base_url.iter().find_map(|p| entry.pointer(p).and_then(Value::as_str).map(str::to_string));
+            for m in provider_models(entry, &spec.models) {
+                out.push((name.clone(), m, base.clone()));
+            }
+        }
+    }
+    out
 }
 
 /// The raw MCP server entries a harness has configured right now, by name.

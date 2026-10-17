@@ -117,15 +117,20 @@ fn tier_for(params: Option<f64>) -> u8 {
 /// A model candidate with what's known about it here.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
-struct Candidate {
-    id: String,
-    tier: u8,
-    params_b: Option<f64>,
-    min_memory_gb: Option<f64>,
-    present: bool,
-    tools: bool,
-    roles: Vec<String>,
-    from: &'static str,
+pub(crate) struct Candidate {
+    pub(crate) id: String,
+    pub(crate) tier: u8,
+    pub(crate) params_b: Option<f64>,
+    pub(crate) min_memory_gb: Option<f64>,
+    pub(crate) present: bool,
+    pub(crate) tools: bool,
+    pub(crate) roles: Vec<String>,
+    pub(crate) from: &'static str,
+}
+
+/// A runtime's catalog models and on-disk weights that fit `usable_gb`.
+pub(crate) fn local_candidates(rt: &RuntimeProfile, usable_gb: Option<f64>, ctx: &Ctx) -> Vec<Candidate> {
+    candidates(rt, &LocalizeOptions::default(), usable_gb, ctx)
 }
 
 /// Models already in an Ollama store, with their sizes.
@@ -416,7 +421,7 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
         }
         lock.native.retain(|n| n.kind == "package");
         lock.config.clear();
-        lock.skill.retain(|s| !matches!(s.origin.as_str(), "harness-builtin" | "bundled"));
+        lock.skill.retain(|s| !matches!(s.origin.as_str(), "harness-builtin" | "bundled" | "harness-managed"));
         if let Some(tpl) = target.instructions.iter().find(|i| i.starts_with("{root}/")) {
             for i in lock.instructions.iter_mut().filter(|i| i.scope == "user") {
                 i.name = tpl.clone();

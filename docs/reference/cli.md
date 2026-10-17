@@ -58,17 +58,26 @@ relative to where you run the command.
 
 ## `init`
 
-Write a starter `harness.toml` that uses the reference provider.
+Write a `harness.toml` from what you already use. On a terminal, `init` scans your harness
+and project and asks about each section; see [Starting from your setup](../guides/init.md).
 
 ```bash
-hlock init [--name NAME] [--pack PATH] [--harness NAME] [--force]
+hlock init [--dir DIR] [--harness NAME] [--pack PATH]... [--yes | --interactive]
+           [--dry-run | --json] [--template] [--name NAME] [--memory-gb N] [--force]
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `--name` | `demo` | Project name |
-| `--pack` | `./tasks` | Task pack directory. Warns if it has no `pack.toml`. |
-| `--harness` | the harness you're running inside | Write `[target] harness`. Without it, and outside a harness, `[target]` is left commented out. |
+| `--dir DIR` | the current directory | Project to scan, and where `harness.toml` is written (unless `-m` names a path) |
+| `--harness` | the harness you're running inside, or the only one installed | Harness to scan, and `[target] harness` |
+| `--pack PATH` | scan for `pack.toml` | Task pack directory (repeatable) |
+| `--name` | the project's name from `pyproject.toml`/`package.json`, else the directory name | Project name |
+| `-y`, `--yes` | | Take the suggested choices without asking |
+| `--interactive/--no-interactive` | on a terminal | Ask about each section |
+| `--memory-gb` | measured | Memory budget for suggesting local models |
+| `--template` | | Write the minimal offline starter (reference models) without scanning |
+| `--dry-run` | | Print the manifest instead of writing it |
+| `--json` | | Print what the scan found and write nothing |
 | `--force` | | Overwrite an existing `harness.toml` |
 
 ## `resolve`

@@ -486,7 +486,7 @@ pub fn plan(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opts: 
     let write_dir = profile.skills.write.as_ref().map(|w| expand(w, &root, &t));
     let mut locked_skill_dirs = BTreeSet::new();
     for s in &lock.skill {
-        if matches!(s.origin.as_str(), "harness-builtin" | "bundled") {
+        if matches!(s.origin.as_str(), "harness-builtin" | "bundled" | "harness-managed") {
             continue; // provided by the harness / its plugins
         }
         let Some(path) = &s.path else { continue };

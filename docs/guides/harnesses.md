@@ -73,15 +73,9 @@ harness = "claude-code"        # an id or alias: claude, codex, pi, opencode, �
 ```
 
 It belongs in `harness.toml` rather than only on the command line because it changes what
-the lock means, and the manifest hash covers it. `hlock init` writes it for you when you run
-it inside a harness, or when you pass `--harness`:
-
-```console
-$ hlock init --pack ./tasks --harness claude
-✓ wrote harness.toml  (project 'demo', task pack ./tasks)
-target claude-code  (--harness)
-next → hlock resolve
-```
+the lock means, and the manifest hash covers it. [`hlock init`](init.md) writes it for you,
+from the harness you're running inside or the one you name with `--harness`, along with what
+that harness uses.
 
 Commands that act on a harness pick it in this order:
 

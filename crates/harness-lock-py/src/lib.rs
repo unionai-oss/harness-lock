@@ -838,6 +838,31 @@ fn localize(
     Ok(json_str(serde_json::json!({"lock": o.lock, "report": o.report, "path": out})))
 }
 
+/// Scan a project directory and its target harness for `hlock init`. Returns the
+/// discovery (sections of choices, pre-selected where in use) as JSON.
+#[pyfunction]
+#[pyo3(signature = (dir=None, harness=None, memory_gb=None, packs=Vec::new()))]
+fn init_discover(dir: Option<String>, harness: Option<String>, memory_gb: Option<f64>, packs: Vec<String>) -> PyResult<String> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let root = dir.map(|d| if Path::new(&d).is_absolute() { PathBuf::from(d) } else { cwd.join(d) }).unwrap_or(cwd);
+    let ctx = core::profiles::Ctx::at(&root);
+    let reg = core::Registry::load(&ctx).map_err(py_err)?;
+    let opts = core::discover::DiscoverOptions { harness, memory_gb, packs };
+    let d = core::discover::discover(&reg, &ctx, &opts).map_err(py_err)?;
+    Ok(json_str(serde_json::json!(d)))
+}
+
+/// Render a manifest from a discovery (JSON) and the chosen item ids per section
+/// (JSON object; sections left out keep their pre-selected items).
+#[pyfunction]
+#[pyo3(signature = (discovery, picks="{}".to_string(), name=None))]
+fn init_render(discovery: &str, picks: String, name: Option<String>) -> PyResult<String> {
+    let d: core::discover::Discovery = serde_json::from_str(discovery).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let picks: std::collections::BTreeMap<String, Vec<String>> =
+        serde_json::from_str(&picks).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(core::discover::render(&d, &picks, name.as_deref()))
+}
+
 #[pymodule]
 fn _harness_lock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyManifest>()?;
@@ -863,6 +888,8 @@ fn _harness_lock(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(launch_prepare, m)?)?;
     m.add_function(wrap_pyfunction!(run_code_harness, m)?)?;
     m.add_function(wrap_pyfunction!(localize, m)?)?;
+    m.add_function(wrap_pyfunction!(init_discover, m)?)?;
+    m.add_function(wrap_pyfunction!(init_render, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("LOCK_VERSION", core::LOCK_VERSION)?;
     Ok(())
