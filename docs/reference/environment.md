@@ -1,13 +1,25 @@
 # Environment variables
 
-`hlock` reads these variables. Only the worker (the `devbox` and `cluster`
-[backends](../guides/backends.md)) uses them. The `local` backend ignores them all.
+`hlock` reads these variables.
+
+## Project and harness
+
+| Variable | Default | Description |
+|---|---|---|
+| `HLOCK_MANIFEST` | the nearest `harness.toml` | Same as `-m/--manifest` |
+| `HLOCK_LOCKFILE` | `harness.lock` next to the manifest | Same as `--lock` |
+| `HLOCK_HARNESS` | unset | Target harness, between `--harness` and `[target] harness` in precedence. See [Harnesses](../guides/harnesses.md#target-a-harness). |
+| `HLOCK_PROFILE_PATH` | unset | Extra profile directories (`:`-separated). See [Harness profiles](../guides/harness-profiles.md). |
+| `HLOCK_SECRET_*` | unset | Values for secret placeholders in a pinned lock. See [Pinning your setup](../guides/pin.md#secrets-stay-out). |
+
+The variables below are used by the worker (the `devbox` and `cluster`
+[backends](../guides/backends.md)); the `local` backend ignores them.
 
 ## Worker
 
 | Variable | Default | Description |
 |---|---|---|
-| `HL_PYTHON` | `python3` | Interpreter the Rust core uses to launch the worker. Point it at one with `hlock` installed. |
+| `HL_PYTHON` | the interpreter running `hlock` | Interpreter the Rust core uses to launch the worker, and the default for [code harnesses](../guides/harnesses.md#how-hlock-runs-a-code-harness). Point it at one with `hlock` installed. |
 
 ## LLM calls
 

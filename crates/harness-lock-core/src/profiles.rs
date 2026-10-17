@@ -83,6 +83,14 @@ impl Ctx {
         }
     }
 
+    /// The process context with `cwd` set to a project directory (where the manifest
+    /// lives), so project-relative paths resolve there and not in a subdirectory.
+    pub fn at(root: &Path) -> Ctx {
+        let mut c = Ctx::from_process();
+        c.cwd = if root.is_absolute() { root.to_path_buf() } else { c.cwd.join(root) };
+        c
+    }
+
     /// A non-empty environment variable.
     pub fn var(&self, key: &str) -> Option<&str> {
         self.env.get(key).map(String::as_str).filter(|v| !v.is_empty())

@@ -7,7 +7,8 @@ $ hlock --help
  hlock · make your agent harness pinnable, portable, and tunable.
 ```
 
-Every command works on `harness.toml` and `harness.lock` in the current directory.
+Every command works on a project's `harness.toml` and `harness.lock`; see
+[Global options](#global-options) for how hlock finds them.
 Output is colored on a terminal and plain text when piped or when `NO_COLOR` is set.
 Failures print a one-line error with a hint and exit `1`.
 
@@ -30,7 +31,30 @@ Failures print a one-line error with a hint and exit `1`.
 | [`optimize`](#optimize) | Tune prompts, hyperparameters, and small models into `harness.opt.lock` |
 | [`localize`](#localize) | Write an all-local equivalent of a lock |
 
-Global options: `-V`/`--version` and `-h`/`--help`.
+## Global options
+
+| Option | Environment | Description |
+|---|---|---|
+| `-m`, `--manifest PATH` | `HLOCK_MANIFEST` | The `harness.toml` to use |
+| `--lock PATH` | `HLOCK_LOCKFILE` | The lockfile to use |
+| `-V`, `--version` | | Print the version |
+| `-h`, `--help` | | Show help |
+
+`-m` and `--lock` work before or after the command: `hlock -m agent/harness.toml resolve`
+and `hlock resolve -m agent/harness.toml` are the same. The one exception is `launch`, where
+everything after the command goes to the harness, so put them first.
+
+**How hlock finds the project.** Without `-m`, hlock uses the nearest `harness.toml` in the
+current directory or any parent, the way Cargo finds `Cargo.toml`, so commands work from
+anywhere inside a project. The directory holding the manifest is the **project root**:
+
+- relative paths in the manifest (`[tasks] packs`, instruction files) resolve against it;
+- the lock defaults to `harness.lock` next to the manifest;
+- `.harnesslock/` (trial artifacts), `.hlock/vendor/` and `.hlock/env/` live there.
+
+Without a manifest (a project that only has a pinned lock), hlock uses the nearest
+`harness.lock` instead. Paths you pass on the command line, like `-o` or `--tasks`, are
+relative to where you run the command.
 
 ## `init`
 

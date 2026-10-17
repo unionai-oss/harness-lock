@@ -62,6 +62,8 @@ pub struct UpgradeSpec {
     pub force: bool,
     /// Where `.harnesslock/` store + runs live.
     pub workdir: PathBuf,
+    /// The lock to upgrade (default `./harness.lock`).
+    pub lock: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,8 +109,8 @@ fn model_of(spec: &str) -> String {
 /// `hlock upgrade`. `manifest` should be loaded from `harness.toml`.
 pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let lock_path = cwd.join(LOCKFILE_PATH);
-    let prev_path = cwd.join(format!("{LOCKFILE_PATH}.prev"));
+    let lock_path = spec.lock.clone().unwrap_or_else(|| cwd.join(LOCKFILE_PATH));
+    let prev_path = PathBuf::from(format!("{}.prev", lock_path.display()));
 
     let current_lock = Lockfile::load(&lock_path).ok();
     let plan = plan_upgrade(current_lock.as_ref(), &manifest, spec);
@@ -172,7 +174,7 @@ pub fn upgrade(manifest: Manifest, spec: &UpgradeSpec) -> Result<UpgradeOutcome>
     derived.candidates = cand;
 
     let mut tuner = Tuner::new(derived, &spec.workdir);
-    let new_lock = tuner.tune()?;
+    let new_lock = tuner.tune_lock()?;
     new_lock.save(&lock_path)?;
 
     let after = baseline_sr(&new_lock);
@@ -222,6 +224,8 @@ pub struct OptimizeSpec {
     /// local | devbox | cluster (overrides the manifest's `[backend] target`).
     pub backend: Option<String>,
     pub workdir: PathBuf,
+    /// The base lock (default `./harness.lock`); `apply` writes back to it.
+    pub lock: Option<PathBuf>,
 }
 
 impl Default for OptimizeSpec {
@@ -236,6 +240,7 @@ impl Default for OptimizeSpec {
             max_trials: None,
             backend: None,
             workdir: PathBuf::from(".harnesslock"),
+            lock: None,
         }
     }
 }
@@ -307,7 +312,8 @@ pub fn optimize(manifest: Manifest, spec: &OptimizeSpec) -> Result<OptimizeOutco
         spec.backend.as_deref().unwrap_or(manifest.backend_target().as_str()),
     );
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let base_lock = Lockfile::load(&cwd.join(LOCKFILE_PATH)).ok();
+    let lock_path = spec.lock.clone().unwrap_or_else(|| cwd.join(LOCKFILE_PATH));
+    let base_lock = Lockfile::load(&lock_path).ok();
     let baseline_sr = base_lock.as_ref().map(baseline_sr).unwrap_or(0.0);
 
     let mut tuner = crate::tuner::Tuner::with_backend(manifest.clone(), &spec.workdir, backend);
@@ -516,7 +522,7 @@ pub fn optimize(manifest: Manifest, spec: &OptimizeSpec) -> Result<OptimizeOutco
     opt_lock.save(out_path)?;
 
     if spec.apply {
-        opt_lock.save(&cwd.join(LOCKFILE_PATH))?;
+        opt_lock.save(&lock_path)?;
     }
 
     let report = serde_json::json!({

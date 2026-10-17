@@ -398,20 +398,24 @@ impl PyLockedAgent {
 // module functions
 // --------------------------------------------------------------------------- //
 #[pyfunction]
-#[pyo3(signature = (manifest=None, backend=None, workdir=None, harness=None))]
+#[pyo3(signature = (manifest=None, backend=None, workdir=None, harness=None, lock=None))]
 fn resolve(
     py: Python<'_>,
     manifest: Option<PyObject>,
     backend: Option<String>,
     workdir: Option<String>,
     harness: Option<String>,
+    lock: Option<String>,
 ) -> PyResult<PyLockfile> {
     let core_manifest = resolve_manifest(py, manifest, backend.as_deref())?;
-    let wd = workdir.unwrap_or_else(|| ".harnesslock".to_string());
+    let root = core_manifest.root();
+    let wd = workdir.map(PathBuf::from).unwrap_or_else(|| root.join(".harnesslock"));
+    let lock = lock.map(PathBuf::from).unwrap_or_else(|| root.join(core::LOCKFILE_PATH));
     let backend = core::Backend::parse(core_manifest.backend_target().as_str());
     let mut tuner = core::Tuner::with_backend(core_manifest, &wd, backend);
     tuner.harness_override = harness;
-    let lf = tuner.tune().map_err(py_err)?;
+    let lf = tuner.tune_lock().map_err(py_err)?;
+    lf.save(&lock).map_err(py_err)?;
     Ok(PyLockfile { inner: lf })
 }
 
@@ -443,7 +447,12 @@ fn resolve_manifest(py: Python<'_>, manifest: Option<PyObject>, backend: Option<
                 ));
             }
         }
-        None => core::Manifest::load(Path::new("harness.toml")).map_err(py_err)?,
+        None => {
+            // the nearest harness.toml at or above the working directory
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let path = core::find_manifest(&cwd).unwrap_or_else(|| cwd.join(core::MANIFEST_PATH));
+            core::Manifest::load(&path).map_err(py_err)?
+        }
     };
     if let Some(b) = backend {
         m.backend.insert("target".to_string(), serde_json::json!(b));
@@ -452,7 +461,7 @@ fn resolve_manifest(py: Python<'_>, manifest: Option<PyObject>, backend: Option<
 }
 
 #[pyfunction]
-#[pyo3(signature = (manifest=None, to=None, all=false, apply=false, rollback=false, force=false, workdir=None))]
+#[pyo3(signature = (manifest=None, to=None, all=false, apply=false, rollback=false, force=false, workdir=None, lock=None))]
 fn upgrade(
     py: Python<'_>,
     manifest: Option<PyObject>,
@@ -462,15 +471,18 @@ fn upgrade(
     rollback: bool,
     force: bool,
     workdir: Option<String>,
+    lock: Option<String>,
 ) -> PyResult<String> {
     let m = resolve_manifest(py, manifest, None)?;
+    let root = m.root();
     let spec = core::ops::UpgradeSpec {
         to,
         all,
         apply,
         rollback,
         force,
-        workdir: PathBuf::from(workdir.unwrap_or_else(|| ".harnesslock".to_string())),
+        workdir: workdir.map(PathBuf::from).unwrap_or_else(|| root.join(".harnesslock")),
+        lock: Some(lock.map(PathBuf::from).unwrap_or_else(|| root.join(core::LOCKFILE_PATH))),
     };
     let o = core::ops::upgrade(m, &spec).map_err(py_err)?;
     Ok(serde_json::json!({
@@ -486,7 +498,7 @@ fn upgrade(
 }
 
 #[pyfunction]
-#[pyo3(signature = (manifest=None, depth="auto".to_string(), data="user".to_string(), harness=None, out=None, strict=false, apply=false, max_trials=None, backend=None, workdir=None))]
+#[pyo3(signature = (manifest=None, depth="auto".to_string(), data="user".to_string(), harness=None, out=None, strict=false, apply=false, max_trials=None, backend=None, workdir=None, lock=None))]
 fn optimize(
     py: Python<'_>,
     manifest: Option<PyObject>,
@@ -499,18 +511,21 @@ fn optimize(
     max_trials: Option<usize>,
     backend: Option<String>,
     workdir: Option<String>,
+    lock: Option<String>,
 ) -> PyResult<String> {
     let m = resolve_manifest(py, manifest, backend.as_deref())?;
+    let root = m.root();
     let spec = core::ops::OptimizeSpec {
         depth,
         data,
         harness,
-        out: PathBuf::from(out.unwrap_or_else(|| "harness.opt.lock".to_string())),
+        out: out.map(PathBuf::from).unwrap_or_else(|| root.join("harness.opt.lock")),
         strict,
         apply,
         max_trials,
         backend,
-        workdir: PathBuf::from(workdir.unwrap_or_else(|| ".harnesslock".to_string())),
+        workdir: workdir.map(PathBuf::from).unwrap_or_else(|| root.join(".harnesslock")),
+        lock: Some(lock.map(PathBuf::from).unwrap_or_else(|| root.join(core::LOCKFILE_PATH))),
     };
     let o = core::ops::optimize(m, &spec).map_err(py_err)?;
     Ok(serde_json::json!({
@@ -524,14 +539,39 @@ fn optimize(
 // --------------------------------------------------------------------------- //
 // harness & runtime profiles
 // --------------------------------------------------------------------------- //
-/// The profile registry for this directory: built-ins, profile dirs, and the
-/// `[harnesses.<id>]` tables of `./harness.toml` when there is one.
-fn registry() -> PyResult<(core::Registry, core::profiles::Ctx)> {
-    let ctx = core::profiles::Ctx::from_process();
-    let path = ctx.cwd.join(core::MANIFEST_PATH);
-    let manifest = if path.is_file() { Some(core::Manifest::load(&path).map_err(py_err)?) } else { None };
-    let reg = core::Registry::load_for(&ctx, manifest.as_ref()).map_err(py_err)?;
-    Ok((reg, ctx))
+/// The project: `manifest` (a path, existing or not) or the nearest `harness.toml`
+/// at or above the working directory, else `fallback_root` (a lock's directory),
+/// else the working directory. Returns the manifest if one exists, and a context
+/// rooted at the project directory so project-relative paths resolve there.
+fn project(manifest: Option<&str>, fallback_root: Option<&Path>) -> PyResult<(Option<core::Manifest>, core::profiles::Ctx)> {
+    let proc = core::profiles::Ctx::from_process();
+    let path = match manifest {
+        Some(m) => Some(if Path::new(m).is_absolute() { PathBuf::from(m) } else { proc.cwd.join(m) }),
+        None => core::find_manifest(&proc.cwd),
+    };
+    match path {
+        Some(p) => {
+            let root = p.parent().map(Path::to_path_buf).unwrap_or_else(|| proc.cwd.clone());
+            let m = if p.is_file() { Some(core::Manifest::load(&p).map_err(py_err)?) } else { None };
+            Ok((m, core::profiles::Ctx::at(&root)))
+        }
+        None => Ok((None, fallback_root.map(core::profiles::Ctx::at).unwrap_or(proc))),
+    }
+}
+
+/// The directory a lock path lives in (absolute).
+fn lock_dir(path: &str) -> PathBuf {
+    let p = Path::new(path);
+    let abs = if p.is_absolute() { p.to_path_buf() } else { std::env::current_dir().unwrap_or_default().join(p) };
+    abs.parent().map(Path::to_path_buf).unwrap_or_default()
+}
+
+/// The profile registry for a project: built-ins, profile dirs, and the manifest's
+/// `[harnesses.<id>]` tables.
+fn registry(manifest: Option<&str>, fallback_root: Option<&Path>) -> PyResult<(core::Registry, core::profiles::Ctx, Option<core::Manifest>)> {
+    let (m, ctx) = project(manifest, fallback_root)?;
+    let reg = core::Registry::load_for(&ctx, m.as_ref()).map_err(py_err)?;
+    Ok((reg, ctx, m))
 }
 
 fn json_str(v: serde_json::Value) -> String {
@@ -541,9 +581,9 @@ fn json_str(v: serde_json::Value) -> String {
 /// Every known harness profile with what's installed here, as a JSON list.
 /// Pass `probe=False` to skip running each harness's `--version`.
 #[pyfunction]
-#[pyo3(signature = (probe=true))]
-fn harnesses(probe: bool) -> PyResult<String> {
-    let (reg, ctx) = registry()?;
+#[pyo3(signature = (probe=true, manifest=None))]
+fn harnesses(probe: bool, manifest: Option<String>) -> PyResult<String> {
+    let (reg, ctx, _) = registry(manifest.as_deref(), None)?;
     let rows: Vec<serde_json::Value> = reg
         .harnesses
         .iter()
@@ -564,9 +604,9 @@ fn harnesses(probe: bool) -> PyResult<String> {
 
 /// Every known inference-runtime profile with what's installed here, as JSON.
 #[pyfunction]
-#[pyo3(signature = (probe=true))]
-fn runtimes(probe: bool) -> PyResult<String> {
-    let (reg, ctx) = registry()?;
+#[pyo3(signature = (probe=true, manifest=None))]
+fn runtimes(probe: bool, manifest: Option<String>) -> PyResult<String> {
+    let (reg, ctx, _) = registry(manifest.as_deref(), None)?;
     let rows: Vec<serde_json::Value> = reg
         .runtimes
         .iter()
@@ -587,8 +627,9 @@ fn runtimes(probe: bool) -> PyResult<String> {
 
 /// One harness profile (by id or alias), its probe, and the paths it resolves to here.
 #[pyfunction]
-fn harness_profile(name: &str) -> PyResult<String> {
-    let (reg, ctx) = registry()?;
+#[pyo3(signature = (name, manifest=None))]
+fn harness_profile(name: &str, manifest: Option<String>) -> PyResult<String> {
+    let (reg, ctx, _) = registry(manifest.as_deref(), None)?;
     let h = reg.require_harness(name).map_err(py_err)?;
     let root = h.config_root(&ctx);
     let files: serde_json::Map<String, serde_json::Value> = h
@@ -620,9 +661,9 @@ fn harness_profile(name: &str) -> PyResult<String> {
 /// `manifest_target`, then the harness running this process, then the only
 /// installed one. Returns JSON `{"id", "reason"}`.
 #[pyfunction]
-#[pyo3(signature = (explicit=None, manifest_target=None))]
-fn select_harness(explicit: Option<String>, manifest_target: Option<String>) -> PyResult<String> {
-    let (reg, ctx) = registry()?;
+#[pyo3(signature = (explicit=None, manifest_target=None, manifest=None))]
+fn select_harness(explicit: Option<String>, manifest_target: Option<String>, manifest: Option<String>) -> PyResult<String> {
+    let (reg, ctx, _) = registry(manifest.as_deref(), None)?;
     let sel = reg.select(explicit.as_deref(), manifest_target.as_deref(), &ctx).map_err(py_err)?;
     Ok(json_str(serde_json::json!(sel)))
 }
@@ -631,11 +672,10 @@ fn select_harness(explicit: Option<String>, manifest_target: Option<String>) -> 
 /// Returns JSON with the lock, the chosen harness, the diff from a previous pin,
 /// vendored files, and warnings.
 #[pyfunction]
-#[pyo3(signature = (harness=None, out="harness.lock".to_string(), vendor=true, force=false))]
-fn pin(harness: Option<String>, out: String, vendor: bool, force: bool) -> PyResult<String> {
-    let (reg, ctx) = registry()?;
-    let path = ctx.cwd.join(core::MANIFEST_PATH);
-    let manifest = if path.is_file() { core::Manifest::load(&path).ok() } else { None };
+#[pyo3(signature = (harness=None, out="harness.lock".to_string(), vendor=true, force=false, manifest=None))]
+fn pin(harness: Option<String>, out: String, vendor: bool, force: bool, manifest: Option<String>) -> PyResult<String> {
+    let (reg, ctx, manifest) = registry(manifest.as_deref(), Some(&lock_dir(&out)))?;
+    let out = if Path::new(&out).is_absolute() { out } else { std::env::current_dir().unwrap_or_default().join(&out).to_string_lossy().into_owned() };
     let target = manifest.as_ref().and_then(|m| m.target_harness());
     let project = manifest.as_ref().and_then(|m| m.project.get("name").and_then(|v| v.as_str()).map(str::to_string));
     let o = core::capture::pin(&reg, &ctx, harness.as_deref(), target.as_deref(), project.as_deref(), Path::new(&out), vendor, force)
@@ -653,9 +693,9 @@ fn pin(harness: Option<String>, out: String, vendor: bool, force: bool) -> PyRes
 
 /// Re-capture the harness a pinned lock is for; returns a JSON list of drift lines.
 #[pyfunction]
-#[pyo3(signature = (path="harness.lock".to_string()))]
-fn check_pin(path: String) -> PyResult<String> {
-    let (reg, ctx) = registry()?;
+#[pyo3(signature = (path="harness.lock".to_string(), manifest=None))]
+fn check_pin(path: String, manifest: Option<String>) -> PyResult<String> {
+    let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
     let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
     let drift = core::capture::check_pin(&lock, &reg, &ctx).map_err(py_err)?;
     Ok(json_str(serde_json::json!(drift)))
@@ -674,9 +714,9 @@ fn sync_options(prefix: Option<String>, docker: Option<String>, install: bool, p
 
 /// Build the `hlock sync` plan for a lock as JSON. Nothing is changed.
 #[pyfunction]
-#[pyo3(signature = (path="harness.lock".to_string(), prefix=None, docker=None, install=false, pull=false, all_models=false, exact=false))]
-fn sync_plan(path: String, prefix: Option<String>, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool) -> PyResult<String> {
-    let (reg, ctx) = registry()?;
+#[pyo3(signature = (path="harness.lock".to_string(), prefix=None, docker=None, install=false, pull=false, all_models=false, exact=false, manifest=None))]
+fn sync_plan(path: String, prefix: Option<String>, docker: Option<String>, install: bool, pull: bool, all_models: bool, exact: bool, manifest: Option<String>) -> PyResult<String> {
+    let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
     let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
     let opts = sync_options(prefix, docker, install, pull, all_models, exact);
     let plan = core::sync::plan(&lock, Path::new(&path), &reg, &ctx, &opts).map_err(py_err)?;
@@ -700,10 +740,10 @@ fn sync_skill(plan: &str, lock_name: String) -> PyResult<String> {
 
 /// The Dockerfile and entrypoint for a docker-mode plan, as JSON.
 #[pyfunction]
-#[pyo3(signature = (plan, path="harness.lock".to_string()))]
-fn sync_dockerfile(plan: &str, path: String) -> PyResult<String> {
+#[pyo3(signature = (plan, path="harness.lock".to_string(), manifest=None))]
+fn sync_dockerfile(plan: &str, path: String, manifest: Option<String>) -> PyResult<String> {
     let plan: core::sync::Plan = serde_json::from_str(plan).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let (reg, _) = registry()?;
+    let (reg, _, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
     let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
     let profile = reg.require_harness(&plan.harness).map_err(py_err)?;
     let (dockerfile, entrypoint) = core::sync::dockerfile(&plan, &lock, profile);
@@ -713,7 +753,7 @@ fn sync_dockerfile(plan: &str, path: String) -> PyResult<String> {
 /// Prepare `hlock launch`: verify, materialize the isolated root, and return
 /// JSON with the argv and environment to exec, plus what was done and notes.
 #[pyfunction]
-#[pyo3(signature = (path="harness.lock".to_string(), harness=None, prefix=None, allow_version_mismatch=false, in_place=false, args=Vec::new()))]
+#[pyo3(signature = (path="harness.lock".to_string(), harness=None, prefix=None, allow_version_mismatch=false, in_place=false, args=Vec::new(), manifest=None))]
 fn launch_prepare(
     path: String,
     harness: Option<String>,
@@ -721,10 +761,17 @@ fn launch_prepare(
     allow_version_mismatch: bool,
     in_place: bool,
     args: Vec<String>,
+    manifest: Option<String>,
 ) -> PyResult<String> {
-    let (reg, ctx) = registry()?;
+    let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
     let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
-    let opts = core::launch::LaunchOptions { target: harness, prefix: prefix.map(PathBuf::from), allow_version_mismatch, in_place };
+    let opts = core::launch::LaunchOptions {
+        target: harness,
+        prefix: prefix.map(PathBuf::from),
+        allow_version_mismatch,
+        in_place,
+        workspace: std::env::current_dir().ok(),
+    };
     let prep = core::launch::prepare(&lock, Path::new(&path), &reg, &ctx, &opts, &args).map_err(py_err)?;
     Ok(json_str(serde_json::json!(prep)))
 }
@@ -732,15 +779,16 @@ fn launch_prepare(
 /// Run a locked code harness (`[harnesses.<id>]`) on a prompt through the
 /// execution contract. Returns JSON with success, output, cost, latency and log.
 #[pyfunction]
-#[pyo3(signature = (prompt, path="harness.lock".to_string(), workspace=None, timeout=600))]
-fn run_code_harness(prompt: String, path: String, workspace: Option<String>, timeout: u64) -> PyResult<String> {
-    let (reg, ctx) = registry()?;
+#[pyo3(signature = (prompt, path="harness.lock".to_string(), workspace=None, timeout=600, manifest=None))]
+fn run_code_harness(prompt: String, path: String, workspace: Option<String>, timeout: u64, manifest: Option<String>) -> PyResult<String> {
+    let (reg, ctx, _) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
     let lock = core::Lockfile::load(Path::new(&path)).map_err(py_err)?;
     let profile = reg.require_harness(&lock.harness.name).map_err(py_err)?;
     if profile.kind != "custom" {
         return Err(PyValueError::new_err(format!("{} isn't a code harness", profile.id)));
     }
-    let ws = workspace.map(PathBuf::from).unwrap_or_else(|| ctx.cwd.clone());
+    // the agent works where the user is; the project root stays on PYTHONPATH
+    let ws = workspace.map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| ctx.cwd.clone());
     let inv = core::contract::invocation(profile, Some(&lock), Some(Path::new(&path)), None, &prompt, &ws, 0, &ctx).map_err(py_err)?;
     let r = core::contract::run(&inv, &ctx, std::time::Duration::from_secs(timeout)).map_err(py_err)?;
     Ok(json_str(serde_json::json!(r)))
@@ -750,7 +798,7 @@ fn run_code_harness(prompt: String, path: String, workspace: Option<String>, tim
 /// `tasks` (a task pack path) or `./harness.toml`'s task packs when available.
 /// Returns JSON with the lock and the localize report.
 #[pyfunction]
-#[pyo3(signature = (path="harness.lock".to_string(), out="harness.local.lock".to_string(), harness=None, runtime=None, models=Vec::new(), memory_gb=None, tasks=None, strict=false, allow_network=false, workdir=None))]
+#[pyo3(signature = (path="harness.lock".to_string(), out="harness.local.lock".to_string(), harness=None, runtime=None, models=Vec::new(), memory_gb=None, tasks=None, strict=false, allow_network=false, workdir=None, manifest=None))]
 fn localize(
     path: String,
     out: String,
@@ -762,8 +810,9 @@ fn localize(
     strict: bool,
     allow_network: bool,
     workdir: Option<String>,
+    manifest: Option<String>,
 ) -> PyResult<String> {
-    let (reg, ctx) = registry()?;
+    let (reg, ctx, found) = registry(manifest.as_deref(), Some(&lock_dir(&path)))?;
     let manifest = match tasks {
         Some(t) => Some(
             core::Manifest::from_str(&format!(
@@ -771,10 +820,7 @@ fn localize(
             ))
             .map_err(py_err)?,
         ),
-        None => {
-            let p = ctx.cwd.join(core::MANIFEST_PATH);
-            if p.is_file() { Some(core::Manifest::load(&p).map_err(py_err)?) } else { None }
-        }
+        None => found,
     };
     let opts = core::localize::LocalizeOptions {
         harness,
@@ -784,9 +830,11 @@ fn localize(
         manifest,
         strict,
         allow_network,
-        workdir: PathBuf::from(workdir.unwrap_or_else(|| ".harnesslock/localize".to_string())),
+        workdir: workdir.map(PathBuf::from).unwrap_or_else(|| ctx.cwd.join(".harnesslock/localize")),
     };
-    let o = core::localize::localize_to(Path::new(&path), Path::new(&out), &reg, &ctx, &opts).map_err(py_err)?;
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let abs = |p: &str| if Path::new(p).is_absolute() { PathBuf::from(p) } else { cwd.join(p) };
+    let o = core::localize::localize_to(&abs(&path), &abs(&out), &reg, &ctx, &opts).map_err(py_err)?;
     Ok(json_str(serde_json::json!({"lock": o.lock, "report": o.report, "path": out})))
 }
 

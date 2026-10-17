@@ -502,7 +502,13 @@ pub fn localize(source: &Lockfile, source_path: &Path, reg: &Registry, ctx: &Ctx
 /// Localize and write the lock to `out`, with its vendored files beside it.
 pub fn localize_to(source_path: &Path, out: &Path, reg: &Registry, ctx: &Ctx, opts: &LocalizeOptions) -> Result<LocalizeOutcome> {
     let source = Lockfile::load(source_path)?;
-    let o = localize(&source, source_path, reg, ctx, opts)?;
+    let mut o = localize(&source, source_path, reg, ctx, opts)?;
+    // record the source relative to the new lock when they share a directory
+    if source_path.parent() == out.parent() {
+        if let Some(name) = source_path.file_name() {
+            o.lock.base_lock = Some(name.to_string_lossy().into_owned());
+        }
+    }
     let base = out.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| ctx.cwd.clone());
     let _ = std::fs::remove_dir_all(base.join(VENDOR_DIR).join(&o.lock.harness.name).join("localize"));
     for f in &o.vendor {

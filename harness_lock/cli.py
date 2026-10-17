@@ -50,6 +50,65 @@ from harness_lock import upgrade as al_upgrade
 MANIFEST = "harness.toml"
 LOCK = "harness.lock"
 
+
+class _Project:
+    """Where this invocation's manifest and lock live (set by the top-level options)."""
+
+    manifest: Path = Path(MANIFEST)
+    lock: Path = Path(LOCK)
+
+
+def _find_up(name: str, start: Path) -> Path | None:
+    for d in (start, *start.parents):
+        if (d / name).is_file():
+            return d / name
+    return None
+
+
+def _set_project(manifest: str | None, lock: str | None) -> None:
+    """`-m` / `HLOCK_MANIFEST`, else the nearest harness.toml at or above the working
+    directory, else ./harness.toml. The lock defaults to harness.lock next to the
+    manifest (or the nearest harness.lock when there's no manifest)."""
+    cwd = Path.cwd()
+    m = Path(manifest).expanduser() if manifest else _find_up(MANIFEST, cwd)
+    if m is not None and not m.is_absolute():
+        m = cwd / m
+    if lock:
+        lk = Path(lock).expanduser()
+        lk = lk if lk.is_absolute() else cwd / lk
+    elif m is not None:
+        lk = m.parent / LOCK
+    else:
+        lk = _find_up(LOCK, cwd) or cwd / LOCK
+    _Project.manifest = m if m is not None else cwd / MANIFEST
+    _Project.lock = lk
+
+
+def _m() -> str:
+    """The manifest path."""
+    return str(_Project.manifest)
+
+
+def _l() -> str:
+    """The lock path."""
+    return str(_Project.lock)
+
+
+def _show(path: str | Path) -> str:
+    """A path for messages: relative to the working directory when it's inside it."""
+    try:
+        return str(Path(path).resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(path)
+
+
+def _md() -> str:
+    return _show(_Project.manifest)
+
+
+def _ld() -> str:
+    return _show(_Project.lock)
+
 THEME = Theme(
     {
         "brand": "bold magenta",
@@ -89,25 +148,25 @@ os.environ.setdefault("HL_PYTHON", sys.executable)
 
 def _fail(message: str, hint: str | None = None) -> None:
     """Exit 1 with a one-line error (and an optional hint), never a traceback."""
-    err_console.print(f"[fail]✗ error:[/] {message}")
+    err_console.print(f"[fail]✗ error:[/] {message}", soft_wrap=True)
     if hint:
         err_console.print(f"  [muted]hint:[/] {hint}")
     sys.exit(1)
 
 
 def _hint_for(message: str) -> str | None:
-    if "cannot read" in message and MANIFEST in message:
-        return "create one with [cmd]hlock init[/]"
-    if "cannot read" in message and LOCK in message:
+    if "cannot read" in message and Path(_m()).name in message:
+        return "create one with [cmd]hlock init[/], or point at one with [cmd]-m PATH[/]"
+    if "cannot read" in message and Path(_l()).name in message:
         return "write one with [cmd]hlock resolve[/]"
     if "no tasks loaded" in message or "no viable stack" in message:
-        return f"check that [key]\\[tasks] packs[/] in [path]{MANIFEST}[/] point at a directory with a pack.toml"
+        return f"check that [key]\\[tasks] packs[/] in [path]{_md()}[/] point at a directory with a pack.toml"
     if "task pack" in message:
-        return f"check the [key]\\[tasks] packs[/] paths in [path]{MANIFEST}[/]"
+        return f"check the [key]\\[tasks] packs[/] paths in [path]{_md()}[/]"
     if "unknown harness" in message:
         return "list the known harnesses with [cmd]hlock harness list[/]"
     if "several harnesses are installed" in message or "no supported harness" in message:
-        return f"pass [cmd]--harness <name>[/] or set [key]\\[target] harness[/] in [path]{MANIFEST}[/]"
+        return f"pass [cmd]--harness <name>[/] or set [key]\\[target] harness[/] in [path]{_md()}[/]"
     if "resolved lock with evidence" in message:
         return "use [cmd]hlock pin -o pinned.lock[/] to keep both"
     if "python worker" in message:
@@ -164,7 +223,8 @@ def _kv_table() -> Table:
     return t
 
 
-def _lock_panel(lf, title: str = LOCK) -> Panel:
+def _lock_panel(lf, title: str | None = None) -> Panel:
+    title = title or _ld()
     ev = json.loads(lf.evidence)
     stack = _kv_table()
     version = f" [muted]{lf.harness_version}[/]" if lf.harness_version else ""
@@ -204,7 +264,8 @@ def _count_by(items, key) -> str:
     return ", ".join(f"{n} {k}" for k, n in sorted(counts.items(), key=lambda kv: -kv[1]))
 
 
-def _pin_panel(lock: dict, title: str = LOCK) -> Panel:
+def _pin_panel(lock: dict, title: str | None = None) -> Panel:
+    title = title or _ld()
     """The summary panel for a pinned lock (no evidence; components instead)."""
     h = lock.get("harness") or {}
     t = _kv_table()
@@ -243,16 +304,53 @@ def _pin_panel(lock: dict, title: str = LOCK) -> Panel:
                  expand=False, padding=(1, 2))
 
 
-def _print_lock(lf, title: str = LOCK) -> None:
+def _print_lock(lf, title: str | None = None) -> None:
     if lf.kind == "pin":
         console.print(_pin_panel(json.loads(lf.to_json()), title))
     else:
         console.print(_lock_panel(lf, title))
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+_GLOBAL_OPTS = ("-m", "--manifest", "--lock")
+_PASSTHROUGH = ("launch",)  # arguments after these commands belong to the harness
+
+
+def _hoist_global_options(args: list[str]) -> list[str]:
+    """Let `-m/--manifest` and `--lock` appear after the subcommand too
+    (`hlock resolve -m agent/harness.toml`) by moving them in front of it."""
+    sub = next((i for i, a in enumerate(args) if not a.startswith("-") and (i == 0 or args[i - 1] not in _GLOBAL_OPTS)), None)
+    if sub is None or args[sub] in _PASSTHROUGH:
+        return args
+    front, rest, i = args[:sub], [], sub
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            rest.extend(args[i:])
+            break
+        if a in _GLOBAL_OPTS and i + 1 < len(args):
+            front += [a, args[i + 1]]
+            i += 2
+            continue
+        if a.startswith(("--manifest=", "--lock=")):
+            front.append(a)
+        else:
+            rest.append(a)
+        i += 1
+    return front + rest
+
+
+class _Group(click.RichGroup):
+    def parse_args(self, ctx, args):
+        return super().parse_args(ctx, _hoist_global_options(list(args)))
+
+
+@click.group(cls=_Group, context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(__version__, "-V", "--version", prog_name="hlock")
-def main() -> None:
+@click.option("-m", "--manifest", envvar="HLOCK_MANIFEST", default=None, metavar="PATH",
+              help="The harness.toml to use.  [dim]\\[default: the nearest one at or above this directory][/]")
+@click.option("--lock", "lock_path", envvar="HLOCK_LOCKFILE", default=None, metavar="PATH",
+              help="The lockfile to use.  [dim]\\[default: harness.lock next to the manifest][/]")
+def main(manifest: str | None, lock_path: str | None) -> None:
     """[brand]hlock[/] · make your agent harness pinnable, portable, and tunable.
 
     Tune your agent stack against your own tasks, then pin the winner in a
@@ -260,6 +358,7 @@ def main() -> None:
 
     Get started: [cmd]hlock init[/] → [cmd]hlock resolve[/] → [cmd]hlock check[/]
     """
+    _set_project(manifest, lock_path)
 
 
 @main.command()
@@ -270,22 +369,22 @@ def main() -> None:
 @click.option("--force", is_flag=True, help="Overwrite an existing harness.toml.")
 def init(name: str, pack: str, harness: str | None, force: bool) -> None:
     """Write a starter [path]harness.toml[/] manifest."""
-    p = Path(MANIFEST)
+    p = Path(_m())
     if p.exists() and not force:
-        _fail(f"{MANIFEST} already exists", "pass [cmd]--force[/] to overwrite it")
+        _fail(f"{_md()} already exists", "pass [cmd]--force[/] to overwrite it")
     target = None
     if harness:
         with _friendly_errors():
-            target = json.loads(_select_harness(harness))
+            target = json.loads(_select_harness(harness, manifest=_m()))
     else:
         # Only an unambiguous signal (running inside a harness) picks one silently.
         try:
-            sel = json.loads(_select_harness())
+            sel = json.loads(_select_harness(manifest=_m()))
             target = sel if sel["reason"] == "running inside it" else None
         except ValueError:
             target = None
     p.write_text(_default_manifest(name, pack, target["id"] if target else None))
-    _ok(f"wrote [path]{p}[/]  [muted](project {name!r}, task pack {pack})[/]")
+    _ok(f"wrote [path]{_show(p)}[/]  [muted](project {name!r}, task pack {pack})[/]")
     if target:
         console.print(f"[key]target[/] [bold]{target['id']}[/]  [muted]({target['reason']})[/]")
     if not (Path(pack) / "pack.toml").exists():
@@ -301,9 +400,9 @@ def init(name: str, pack: str, harness: str | None, force: bool) -> None:
 @click.option("--workdir", default=None, help="Where to put trial artifacts.  [dim]\\[default: .harnesslock][/]")
 def resolve(backend: str | None, harness: str | None, workdir: str | None) -> None:
     """Tune the search space and write [path]harness.lock[/]."""
-    with _working(f"Resolving {MANIFEST} on the {backend or 'configured'} backend…"):
-        lf = _resolve(MANIFEST, backend=backend, workdir=workdir or ".harnesslock", harness=harness)
-    _ok(f"wrote [path]{LOCK}[/]")
+    with _working(f"Resolving {_md()} on the {backend or 'configured'} backend…"):
+        lf = _resolve(_m(), backend=backend, workdir=workdir, harness=harness, lock=_l())
+    _ok(f"wrote [path]{_ld()}[/]")
     console.print(_lock_panel(lf))
     lock = json.loads(lf.to_json())
     adapter = (lock.get("harness") or {}).get("adapter")
@@ -314,10 +413,10 @@ def resolve(backend: str | None, harness: str | None, workdir: str | None) -> No
         )
     if harness:
         with _friendly_errors():
-            m = Manifest.load(MANIFEST)
-        if m.target_harness is None or json.loads(_select_harness(m.target_harness))["id"] != lf.harness:
+            m = Manifest.load(_m())
+        if m.target_harness is None or json.loads(_select_harness(m.target_harness, manifest=_m()))["id"] != lf.harness:
             console.print(
-                f"[warn]![/] --harness isn't recorded in [path]{MANIFEST}[/]; add "
+                f"[warn]![/] --harness isn't recorded in [path]{_md()}[/]; add "
                 f'[key]\\[target] harness = "{lf.harness}"[/] so [cmd]hlock check[/] can enforce it'
             )
     _next("hlock check", 'hlock run "<prompt>"')
@@ -326,11 +425,11 @@ def resolve(backend: str | None, harness: str | None, workdir: str | None) -> No
 @main.command()
 @click.option("--harness", "harness", default=None,
               help="Harness to pin. [dim]\\[default: \\[target], else the one you're running in][/]")
-@click.option("-o", "--out", default=LOCK, show_default=True, help="Where to write the pinned lock.")
+@click.option("-o", "--out", default=None, help="Where to write the pinned lock.  [dim]\\[default: the project's lock][/]")
 @click.option("--no-vendor", is_flag=True, help="Don't copy unfetchable skills and config into .hlock/vendor.")
 @click.option("--force", is_flag=True, help="Replace a resolved lock (one with evidence).")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def pin(harness: str | None, out: str, no_vendor: bool, force: bool, as_json: bool) -> None:
+def pin(harness: str | None, out: str | None, no_vendor: bool, force: bool, as_json: bool) -> None:
     """Pin your current harness setup into [path]harness.lock[/].
 
     Captures the harness version and install source, the default and small models,
@@ -340,16 +439,17 @@ def pin(harness: str | None, out: str, no_vendor: bool, force: bool, as_json: bo
     vendored into [path].hlock/vendor/[/]. No [path]harness.toml[/] needed.
     """
     with _working("Pinning your harness setup…"):
-        result = json.loads(_pin(harness=harness, out=out, vendor=not no_vendor, force=force))
+        out = out or _l()
+        result = json.loads(_pin(harness=harness, out=out, vendor=not no_vendor, force=force, manifest=_m()))
     if as_json:
         console.print_json(data=result)
         return
     lock, sel = result["lock"], result["selection"]
     h = lock["harness"]
-    _ok(f"pinned [bold]{h['name']}[/] {h.get('version') or ''} → [path]{out}[/]  [muted]({sel['reason']})[/]")
+    _ok(f"pinned [bold]{h['name']}[/] {h.get('version') or ''} → [path]{_show(out)}[/]  [muted]({sel['reason']})[/]")
     for w in result["warnings"]:
         console.print(f"[warn]![/] {w}")
-    console.print(_pin_panel(lock, out))
+    console.print(_pin_panel(lock, _show(out)))
     if result["vendored"]:
         console.print(f"[muted]vendored {len(result['vendored'])} files into[/] [path].hlock/vendor/{h['name']}/[/]  "
                       "[muted]· review before committing[/]")
@@ -405,7 +505,7 @@ def _manual_steps(plan: dict) -> list[dict]:
 
 
 @main.command()
-@click.argument("lock", default=LOCK, required=False)
+@click.argument("lock", default=None, required=False)
 @click.option("--plan", "plan_only", is_flag=True, help="Print the plan and change nothing.")
 @click.option("--json", "as_json", is_flag=True, help="Print the plan as JSON and change nothing.")
 @click.option("-y", "--yes", is_flag=True, help="Don't ask before running automatic steps.")
@@ -429,6 +529,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
     installs need [cmd]--install[/] and model downloads need [cmd]--pull[/]. Exits 3 while manual
     steps remain, so it's safe to re-run until it's clean.
     """
+    lock = lock or _l()
     docker_dir = None
     if docker:
         with _friendly_errors():
@@ -436,7 +537,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
         docker_dir = str(Path(".hlock/docker") / harness_id)
     with _working("Planning…"):
         plan = json.loads(sync_plan(lock, prefix=prefix, docker=docker_dir, install=install, pull=pull,
-                                    all_models=all_models, exact=exact))
+                                    all_models=all_models, exact=exact, manifest=_m()))
     if as_json:
         console.print_json(data=plan)
         return
@@ -448,7 +549,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
     if skill:
         path = Path(skill_dir) / "SKILL.md"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(sync_skill(json.dumps(plan), lock))
+        path.write_text(sync_skill(json.dumps(plan), _show(lock)))
         _ok(f"wrote [path]{path}[/]")
         console.print("[muted]open your agent here and ask it to rehydrate the harness with the hlock-rehydrate skill[/]")
         return
@@ -492,7 +593,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
             console.print(f"[ok]✓[/] restored {done} {kind}s")
 
     if docker:
-        files = json.loads(sync_dockerfile(json.dumps(plan), lock))
+        files = json.loads(sync_dockerfile(json.dumps(plan), lock, manifest=_m()))
         ctx = Path(docker_dir)
         (ctx / "home").mkdir(parents=True, exist_ok=True)
         (ctx / "Dockerfile").write_text(files["dockerfile"])
@@ -548,7 +649,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
         _ok(f"in sync at [path]{_rel(plan['root'])}[/]")
         console.print(f"[muted]use it:[/] [cmd]{env} {plan.get('binary') or plan['harness']}[/]", soft_wrap=True)
     else:
-        _ok(f"in sync with [path]{lock}[/]")
+        _ok(f"in sync with [path]{_show(lock)}[/]")
 
 
 @main.command()
@@ -556,7 +657,7 @@ def sync(lock: str, plan_only: bool, as_json: bool, yes: bool, install: bool, pu
 def show(as_json: bool) -> None:
     """Show the locked stack and the evidence behind it."""
     with _friendly_errors():
-        lf = Lockfile.load(LOCK)
+        lf = Lockfile.load(_l())
     if as_json:
         console.print_json(lf.to_json())
         return
@@ -569,27 +670,30 @@ def check() -> None:
 
     For a pinned lock, re-capture the harness and fail if the setup changed.
     """
+    if not Path(_l()).exists() and not Path(_m()).exists():
+        _fail(f"no {MANIFEST} in this directory or above, and no {LOCK}",
+              "create one with [cmd]hlock init[/], or point at one with [cmd]-m PATH[/]")
     with _friendly_errors():
-        lf = Lockfile.load(LOCK)
+        lf = Lockfile.load(_l())
     if lf.kind == "pin":
         with _working(f"Re-capturing {lf.harness}…"):
-            drift = json.loads(_check_pin(LOCK))
+            drift = json.loads(_check_pin(_l(), manifest=_m()))
         if drift:
-            err_console.print(f"[fail]✗ drift:[/] your {lf.harness} setup changed since {LOCK} was pinned")
+            err_console.print(f"[fail]✗ drift:[/] your {lf.harness} setup changed since {_ld()} was pinned")
             for line in drift:
                 err_console.print(f"  {line}")
             err_console.print("  [muted]hint:[/] re-pin with [cmd]hlock pin[/], or restore it with [cmd]hlock sync[/]")
             sys.exit(1)
-        _ok(f"your {lf.harness} setup matches [path]{LOCK}[/]")
+        _ok(f"your {lf.harness} setup matches [path]{_ld()}[/]")
         return
     with _friendly_errors():
-        m = Manifest.load(MANIFEST)
+        m = Manifest.load(_m())
     if lf.manifest_hash is None:
-        _fail(f"{LOCK} has no manifest-hash", "re-create it with [cmd]hlock resolve[/]")
+        _fail(f"{_ld()} has no manifest-hash", "re-create it with [cmd]hlock resolve[/]")
     live = m.manifest_hash()
     locked = lf.manifest_hash
     if locked.split(":", 1)[-1] != live.split(":", 1)[-1]:
-        err_console.print(f"[fail]✗ drift:[/] {MANIFEST} changed since {LOCK} was written")
+        err_console.print(f"[fail]✗ drift:[/] {_md()} changed since {_ld()} was written")
         grid = _kv_table()
         grid.add_row("locked", f"[muted]{locked}[/]")
         grid.add_row("live", f"[muted]{live}[/]")
@@ -598,27 +702,27 @@ def check() -> None:
         sys.exit(1)
     if m.target_harness:
         with _friendly_errors():
-            want = json.loads(_select_harness(m.target_harness))["id"]
+            want = json.loads(_select_harness(m.target_harness, manifest=_m()))["id"]
         if want != lf.harness:
-            _fail(f"{LOCK} is for harness {lf.harness!r} but {MANIFEST} targets {want!r}",
+            _fail(f"{_ld()} is for harness {lf.harness!r} but {_md()} targets {want!r}",
                   "re-lock with [cmd]hlock resolve[/]")
     if lf.harness_version:
-        probe = json.loads(harness_profile(lf.harness))["probe"] if _known_harness(lf.harness) else None
+        probe = json.loads(harness_profile(lf.harness, manifest=_m()))["probe"] if _known_harness(lf.harness) else None
         if probe and probe["installed"] and probe.get("version") and probe["version"] != lf.harness_version:
-            _fail(f"installed {lf.harness} is {probe['version']}, {LOCK} pins {lf.harness_version}",
+            _fail(f"installed {lf.harness} is {probe['version']}, {_ld()} pins {lf.harness_version}",
                   f"install {lf.harness} {lf.harness_version}, or re-lock with [cmd]hlock resolve[/]")
-    _ok(f"[path]{LOCK}[/] matches [path]{MANIFEST}[/]  [muted]{live.split(':', 1)[-1][:12]}[/]")
+    _ok(f"[path]{_ld()}[/] matches [path]{_md()}[/]  [muted]{live.split(':', 1)[-1][:12]}[/]")
 
 
 @main.command()
 def tree() -> None:
     """Print the locked component dependency graph."""
     with _friendly_errors():
-        lf = Lockfile.load(LOCK)
+        lf = Lockfile.load(_l())
     if lf.kind == "pin":
         console.print(_pin_tree(json.loads(lf.to_json())))
         return
-    root = Tree(f"[brand]🔒 {LOCK}[/]", guide_style="magenta")
+    root = Tree(f"[brand]🔒 {_ld()}[/]", guide_style="magenta")
     stack = root.add(f"[bold]stack[/] [muted]harness={lf.harness}[/]")
     llms = stack.add("[key]llm[/]")
     for role, spec in json.loads(lf.llm):
@@ -631,7 +735,7 @@ def tree() -> None:
 
 def _pin_tree(lock: dict) -> Tree:
     h = lock.get("harness") or {}
-    root = Tree(f"[brand]📌 {LOCK}[/] [muted]pinned[/]", guide_style="magenta")
+    root = Tree(f"[brand]📌 {_ld()}[/] [muted]pinned[/]", guide_style="magenta")
     hn = root.add(f"[bold]{h.get('name')}[/] {h.get('version') or ''}  [muted]{h.get('source') or ''}[/]")
     if lock.get("llm"):
         node = hn.add("[key]llm[/]")
@@ -664,8 +768,8 @@ def _pin_tree(lock: dict) -> Tree:
 def run(prompt: str, as_json: bool) -> None:
     """Run the locked agent on PROMPT."""
     with _friendly_errors():
-        lf = Lockfile.load(LOCK)
-        agent = load(LOCK)
+        lf = Lockfile.load(_l())
+        agent = load(_l())
     if _is_code_harness(lf.harness):
         _run_code_harness(prompt, as_json)
         return
@@ -686,14 +790,14 @@ def run(prompt: str, as_json: bool) -> None:
 
 def _is_code_harness(name: str) -> bool:
     try:
-        return json.loads(harness_profile(name))["profile"]["kind"] == "custom"
+        return json.loads(harness_profile(name, manifest=_m()))["profile"]["kind"] == "custom"
     except ValueError:
         return False
 
 
 def _run_code_harness(prompt: str, as_json: bool) -> None:
     with _working("Running the locked harness…"):
-        r = json.loads(run_code_harness(prompt, LOCK))
+        r = json.loads(run_code_harness(prompt, _l(), manifest=_m()))
     if as_json:
         console.print_json(data=r)
     else:
@@ -706,13 +810,13 @@ def _run_code_harness(prompt: str, as_json: bool) -> None:
 
 @main.command(context_settings={"ignore_unknown_options": True, "allow_interspersed_args": False})
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
-@click.option("--lock", "lock", default=LOCK, show_default=True, help="Lock to launch.")
+@click.option("--lock", "lock", default=None, help="Lock to launch.  [dim]\\[default: the project's lock][/]")
 @click.option("--prefix", default=None, help="Where isolated roots live.  [dim]\\[default: .hlock/env][/]")
 @click.option("--in-place", is_flag=True, help="Use your own config instead of an isolated root (same harness only).")
 @click.option("--allow-version-mismatch", is_flag=True, help="Launch even if the installed version differs from the lock.")
 @click.option("--dry-run", is_flag=True, help="Prepare everything, print the command, and don't start it.")
 @click.option("--json", "as_json", is_flag=True, help="With --dry-run: print the launch plan as JSON.")
-def launch(args: tuple[str, ...], lock: str, prefix: str | None, in_place: bool, allow_version_mismatch: bool,
+def launch(args: tuple[str, ...], lock: str | None, prefix: str | None, in_place: bool, allow_version_mismatch: bool,
            dry_run: bool, as_json: bool) -> None:
     """Start a session in a harness that matches the lock.
 
@@ -754,9 +858,9 @@ def launch(args: tuple[str, ...], lock: str, prefix: str | None, in_place: bool,
             rest.append(a)
         i += 1
     with _working("Preparing the locked environment…"):
-        prep = json.loads(launch_prepare(lock, harness=harness, prefix=prefix,
+        prep = json.loads(launch_prepare(lock or _l(), harness=harness, prefix=prefix,
                                          allow_version_mismatch=allow_version_mismatch,
-                                         in_place=in_place, args=rest))
+                                         in_place=in_place, args=rest, manifest=_m()))
     if as_json:
         console.print_json(data=prep)
         return
@@ -797,7 +901,8 @@ def upgrade(to: str | None, all_: bool, apply: bool, rollback: bool, force: bool
     label = "Rolling back…" if rollback else ("Applying upgrade…" if apply else "Planning upgrades…")
     with _working(label):
         result = json.loads(
-            al_upgrade(to=to, all=all_, apply=apply, rollback=rollback, force=force, workdir=workdir)
+            al_upgrade(_m(), to=to, all=all_, apply=apply, rollback=rollback, force=force, workdir=workdir,
+                       lock=_l())
         )
     items = result.get("plan", {}).get("upgradeable", [])
     if items:
@@ -810,11 +915,11 @@ def upgrade(to: str | None, all_: bool, apply: bool, rollback: bool, force: bool
             t.add_row(item["role"], item["from"], "→", item["to"])
         console.print(t)
     if result.get("rolled_back"):
-        _ok(f"restored [path]{LOCK}[/] from [path]{LOCK}.prev[/]")
+        _ok(f"restored [path]{_ld()}[/] from [path]{_ld()}.prev[/]")
     elif result.get("applied"):
         _ok(
             f"upgraded  [muted]success rate[/] {_pct(result.get('before'))} → "
-            f"[bold]{_pct(result.get('after'))}[/]  [muted](previous lock kept at {LOCK}.prev)[/]"
+            f"[bold]{_pct(result.get('after'))}[/]  [muted](previous lock kept at {_ld()}.prev)[/]"
         )
     else:
         console.print(f"[muted]{result.get('message', '')}[/]")
@@ -839,8 +944,8 @@ def optimize(depth: str, data: str, harness: str | None, out: str, strict: bool,
     """Tune prompts, hyperparameters and small models into [path]harness.opt.lock[/]."""
     with _working(f"Optimizing (depth={depth}, data={data})…"):
         result = json.loads(
-            al_optimize(depth=depth, data=data, harness=harness, out=out, strict=strict, apply=apply,
-                        max_trials=max_trials, backend=backend, workdir=workdir)
+            al_optimize(_m(), depth=depth, data=data, harness=harness, out=out, strict=strict, apply=apply,
+                        max_trials=max_trials, backend=backend, workdir=workdir, lock=_l())
         )
     r = result.get("report", {})
     best = r.get("best") or {}
@@ -867,14 +972,14 @@ def optimize(depth: str, data: str, harness: str | None, out: str, strict: bool,
         title="[brand]⚙ optimize[/]", title_align="left", border_style="magenta", expand=False, padding=(1, 2),
     ))
     if apply:
-        _ok(f"adopted into [path]{LOCK}[/]")
+        _ok(f"adopted into [path]{_ld()}[/]")
     else:
         _next("hlock optimize --apply")
 
 
 def _known_harness(name: str) -> bool:
     try:
-        _select_harness(name)
+        _select_harness(name, manifest=_m())
         return True
     except ValueError:
         return False
@@ -899,11 +1004,11 @@ def harness_list(as_json: bool) -> None:
     [path]harness.toml[/].
     """
     with _working("Probing installed harnesses…"):
-        rows = json.loads(harnesses())
+        rows = json.loads(harnesses(manifest=_m()))
     if as_json:
         console.print_json(data=rows)
         return
-    for kind, title in (("cli", "Agent CLIs"), ("framework", "Frameworks"), ("custom", f"Project harnesses ({MANIFEST})")):
+    for kind, title in (("cli", "Agent CLIs"), ("framework", "Frameworks"), ("custom", f"Project harnesses ({_md()})")):
         group = [r for r in rows if r["kind"] == kind]
         if not group:
             continue
@@ -941,7 +1046,7 @@ def harness_show(name: str | None, as_json: bool) -> None:
     with _friendly_errors():
         if name is None:
             name = json.loads(_select_harness(None, _manifest_target()))["id"]
-        info = json.loads(harness_profile(name))
+        info = json.loads(harness_profile(name, manifest=_m()))
     if as_json:
         console.print_json(data=info)
         return
@@ -1007,13 +1112,13 @@ def runtime_list(as_json: bool) -> None:
 
 def _manifest_target() -> str | None:
     try:
-        return Manifest.load(MANIFEST).target_harness
+        return Manifest.load(_m()).target_harness
     except ValueError:
         return None
 
 
 @main.command()
-@click.argument("lock", default=LOCK, required=False)
+@click.argument("lock", default=None, required=False)
 @click.option("-o", "--out", default="harness.local.lock", show_default=True, help="Where to write the localized lock.")
 @click.option("--harness", default=None, help="Local harness to use. [dim]\\[default: the lock's if local-capable, else the best installed][/]")
 @click.option("--runtime", default=None, help="Inference runtime (ollama, lmstudio, llama-cpp, …). [dim]\\[default: the best installed][/]")
@@ -1023,7 +1128,7 @@ def _manifest_target() -> str | None:
 @click.option("--strict", is_flag=True, help="Drop remote MCP servers instead of flagging them.")
 @click.option("--allow-network", is_flag=True, help="Keep self-hosted runtimes on your network instead of replacing them.")
 @click.option("--json", "as_json", is_flag=True, help="Print the localize report as JSON.")
-def localize(lock: str, out: str, harness: str | None, runtime: str | None, models: str | None,
+def localize(lock: str | None, out: str, harness: str | None, runtime: str | None, models: str | None,
              memory_gb: float | None, tasks: str | None, strict: bool, allow_network: bool, as_json: bool) -> None:
     """Write an all-local equivalent of a lock to [path]harness.local.lock[/].
 
@@ -1034,13 +1139,15 @@ def localize(lock: str, out: str, harness: str | None, runtime: str | None, mode
     """
     model_list = [m.strip() for m in models.split(",")] if models else []
     with _working("Localizing…"):
+        lock = lock or _l()
         result = json.loads(_localize(lock, out, harness=harness, runtime=runtime, models=model_list,
-                                      memory_gb=memory_gb, tasks=tasks, strict=strict, allow_network=allow_network))
+                                      memory_gb=memory_gb, tasks=tasks, strict=strict, allow_network=allow_network,
+                                      manifest=_m()))
     rep = result["report"]
     if as_json:
         console.print_json(data=rep)
         return
-    _ok(f"wrote [path]{out}[/]  [muted](from {lock})[/]")
+    _ok(f"wrote [path]{out}[/]  [muted](from {_show(lock)})[/]")
     t = _kv_table()
     h = rep["harness"]
     inst = "" if h["installed"] else "  [warn]not installed[/]"
@@ -1085,10 +1192,10 @@ def backend() -> None:
 def backend_status() -> None:
     """Show the configured backend and the environment it will use."""
     try:
-        target = Manifest.load(MANIFEST).backend
-        source = f"from {MANIFEST}"
+        target = Manifest.load(_m()).backend
+        source = f"from {_md()}"
     except ValueError:
-        target, source = "local", f"no {MANIFEST}, using the default"
+        target, source = "local", f"no {_md()}, using the default"
 
     t = _kv_table()
     t.add_row("backend", f"[bold]{target}[/]  [muted]({source})[/]")

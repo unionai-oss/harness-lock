@@ -64,7 +64,7 @@ impl Tuner {
     /// Load the manifest's task packs and return the search-split tasks.
     pub fn load_packs(&mut self) -> Vec<crate::tasks::Task> {
         let mut search: Vec<crate::tasks::Task> = Vec::new();
-        let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let base = self.manifest.root();
         for ref_ in self.manifest.task_packs() {
             match TaskPack::load(&ref_, Some(&base)) {
                 Ok(pack) => {

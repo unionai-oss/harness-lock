@@ -32,6 +32,8 @@ pub struct LaunchOptions {
     pub allow_version_mismatch: bool,
     /// Use the user's own config instead of an isolated root (same harness only).
     pub in_place: bool,
+    /// Where a code harness works (default: the project directory).
+    pub workspace: Option<PathBuf>,
 }
 
 /// What to `exec`, and what happened while preparing it.
@@ -277,7 +279,7 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
     let mut prep = LaunchPrep { harness: target.id.clone(), harness_name: target.name.clone(), kind: target.kind.clone(), translated: !same, ..Default::default() };
 
     if target.kind != "cli" {
-        let workspace = ctx.cwd.clone();
+        let workspace = opts.workspace.clone().unwrap_or_else(|| ctx.cwd.clone());
         let prompt = args.join(" ");
         let inv = crate::contract::invocation(target, Some(lock), Some(lock_path), None, &prompt, &workspace, 0, ctx)?;
         prep.argv = inv.argv;
@@ -318,6 +320,7 @@ pub fn prepare(lock: &Lockfile, lock_path: &Path, reg: &Registry, ctx: &Ctx, opt
             Some("harness") | None => PathBuf::from(ENV_DIR),
             Some(stem) => PathBuf::from(ENV_DIR).join(stem),
         });
+        let prefix = if prefix.is_absolute() { prefix } else { ctx.cwd.join(prefix) };
         let sopts = SyncOptions { prefix: Some(prefix), ..Default::default() };
         let (t, _, iso) = sync::target_ctx(target, ctx, &sopts);
         let root = target.config_root(&t);

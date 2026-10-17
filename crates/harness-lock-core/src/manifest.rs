@@ -135,6 +135,19 @@ pub struct Manifest {
     pub source_path: Option<PathBuf>,
 }
 
+/// The nearest `harness.toml` at or above `start`, like Cargo finds `Cargo.toml`.
+pub fn find_manifest(start: &Path) -> Option<PathBuf> {
+    let mut dir = Some(start);
+    while let Some(d) = dir {
+        let candidate = d.join(crate::MANIFEST_PATH);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        dir = d.parent();
+    }
+    None
+}
+
 impl Manifest {
     pub fn load(path: &Path) -> Result<Manifest> {
         let text = std::fs::read_to_string(path)
@@ -143,6 +156,18 @@ impl Manifest {
             .map_err(|e| Error::Manifest(format!("invalid harness.toml: {e}")))?;
         m.source_path = Some(path.to_path_buf());
         Ok(m)
+    }
+
+    /// The project directory: where the manifest lives (else the working directory).
+    /// Relative paths in the manifest (task packs, instructions) resolve against it.
+    pub fn root(&self) -> PathBuf {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        match self.source_path.as_ref().and_then(|p| p.parent()) {
+            Some(d) if d.as_os_str().is_empty() => cwd,
+            Some(d) if d.is_absolute() => d.to_path_buf(),
+            Some(d) => cwd.join(d),
+            None => cwd,
+        }
     }
 
     /// Parse from an in-memory TOML string.
