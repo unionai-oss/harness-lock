@@ -1,10 +1,12 @@
 name: docs
 
 # Builds the Zensical site (zensical.toml + docs/). Pushes to main deploy it to
-# GitHub Pages at https://unionai-oss.github.io/hlock/. Pull requests only
+# GitHub Pages at https://docs.hlock.ai/. Pull requests only
 # build it, so a broken page fails review instead of the deploy.
 #
-# One-time setup: Settings → Pages → Build and deployment → Source: "GitHub Actions".
+# One-time setup: Settings → Pages → Build and deployment → Source: "GitHub Actions",
+# and Custom domain: docs.hlock.ai (DNS: CNAME docs → unionai-oss.github.io). With
+# Actions-based Pages the domain lives in the repo settings, so there's no CNAME file.
 
 on:
   push:

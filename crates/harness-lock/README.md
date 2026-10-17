@@ -13,6 +13,6 @@ under `harness_lock::…`. New projects should depend on the primary name:
 cargo add hlock
 ```
 
-- 📖 **Docs:** <https://unionai-oss.github.io/hlock/> · <https://docs.rs/hlock>
+- 📖 **Docs:** <https://docs.hlock.ai/> · <https://docs.rs/hlock>
 - 💻 **Source:** <https://github.com/unionai-oss/hlock>
 - 🐍 **Python:** `pip install hlock`

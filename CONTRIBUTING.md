@@ -1,7 +1,7 @@
 # Contributing to hlock
 
 Thanks for helping out! The contributing guide lives in the docs:
-**<https://unionai-oss.github.io/hlock/project/contributing/>**
+**<https://docs.hlock.ai/project/contributing/>**
 (source: [`docs/project/contributing.md`](docs/project/contributing.md)).
 
 Quick version:

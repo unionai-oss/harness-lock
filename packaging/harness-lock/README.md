@@ -20,6 +20,6 @@ pip install hlock        # or: uv add hlock
 Either install gives you the `hlock` and `harness-lock` commands, and `import hlock`
 and `import harness_lock` are the same API.
 
-- 📖 **Docs:** <https://unionai-oss.github.io/hlock/>
+- 📖 **Docs:** <https://docs.hlock.ai/>
 - 💻 **Source:** <https://github.com/unionai-oss/hlock>
 - 🦀 **Rust:** `cargo add hlock`

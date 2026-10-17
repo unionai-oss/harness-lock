@@ -11,13 +11,13 @@
 [![PyPI](https://img.shields.io/pypi/v/hlock?label=pypi&color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/hlock/)
 [![crates.io](https://img.shields.io/crates/v/hlock?color=E6532D&logo=rust&logoColor=white)](https://crates.io/crates/hlock)
 [![CI](https://img.shields.io/github/actions/workflow/status/unionai-oss/hlock/ci.yml?branch=main&label=ci&logo=github)](https://github.com/unionai-oss/hlock/actions/workflows/ci.yml)
-[![Docs](https://img.shields.io/badge/docs-unionai--oss.github.io-7C3AED?logo=readthedocs&logoColor=white)](https://unionai-oss.github.io/hlock/)
+[![Docs](https://img.shields.io/badge/docs-docs.hlock.ai-7C3AED?logo=readthedocs&logoColor=white)](https://docs.hlock.ai/)
 [![Python](https://img.shields.io/pypi/pyversions/hlock?logo=python&logoColor=white)](https://pypi.org/project/hlock/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/unionai-oss/hlock/blob/main/LICENSE)
 
-[**Documentation**](https://unionai-oss.github.io/hlock/) ·
-[Quickstart](https://unionai-oss.github.io/hlock/getting-started/quickstart/) ·
-[CLI reference](https://unionai-oss.github.io/hlock/reference/cli/) ·
+[**Documentation**](https://docs.hlock.ai/) ·
+[Quickstart](https://docs.hlock.ai/getting-started/quickstart/) ·
+[CLI reference](https://docs.hlock.ai/reference/cli/) ·
 [Design spec](https://github.com/unionai-oss/hlock/blob/main/SPEC.md)
 
 </div>
@@ -86,10 +86,10 @@ hlock launch            # start a session that matches the lock (or: hlock launc
 hlock localize          # an all-local equivalent: local harness + Ollama/LM Studio models
 ```
 
-See [Harnesses](https://unionai-oss.github.io/hlock/guides/harnesses/) and
-[Pinning your setup](https://unionai-oss.github.io/hlock/guides/pin/),
-[Rehydrating with sync](https://unionai-oss.github.io/hlock/guides/sync/), and
-[Launching a locked harness](https://unionai-oss.github.io/hlock/guides/launch/).
+See [Harnesses](https://docs.hlock.ai/guides/harnesses/) and
+[Pinning your setup](https://docs.hlock.ai/guides/pin/),
+[Rehydrating with sync](https://docs.hlock.ai/guides/sync/), and
+[Launching a locked harness](https://docs.hlock.ai/guides/launch/).
 
 <details>
 <summary><b>Python API</b></summary>
@@ -156,7 +156,7 @@ hlock optimize --backend devbox --depth probe --max-trials 10
 hlock optimize --backend cluster --depth ft --data user:./runs   # LoRA on a GPU worker
 ```
 
-See [Backends](https://unionai-oss.github.io/hlock/guides/backends/) for setup and
+See [Backends](https://docs.hlock.ai/guides/backends/) for setup and
 the `HL_*` environment variables.
 
 ## Development
@@ -174,7 +174,7 @@ uv run --group docs zensical serve # docs at http://localhost:8000
 
 `uv run` rebuilds the extension automatically when Rust sources change.
 
-Want to help? See the [contributing guide](https://unionai-oss.github.io/hlock/project/contributing/). Releases are cut from tags. See [RELEASING.md](https://github.com/unionai-oss/hlock/blob/main/RELEASING.md).
+Want to help? See the [contributing guide](https://docs.hlock.ai/project/contributing/). Releases are cut from tags. See [RELEASING.md](https://github.com/unionai-oss/hlock/blob/main/RELEASING.md).
 
 ## Status
 

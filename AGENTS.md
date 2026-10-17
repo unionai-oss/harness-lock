@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Instructions for coding agents working in this repository. Humans: see the
-[contributing guide](https://unionai-oss.github.io/hlock/project/contributing/).
+[contributing guide](https://docs.hlock.ai/project/contributing/).
 
 ## What this is
 

@@ -27,7 +27,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/unionai-oss/hlock"
-Documentation = "https://unionai-oss.github.io/hlock/"
+Documentation = "https://docs.hlock.ai/"
 Source = "https://github.com/unionai-oss/hlock"
 Issues = "https://github.com/unionai-oss/hlock/issues"
 
